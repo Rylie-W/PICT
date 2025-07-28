@@ -49,28 +49,33 @@ class TurbulenceDataGenerator:
         
         # Create block with specified resolution
         if dims == 3:
-            size = [resolution, resolution, resolution]
+            size = PISOtorch.Int4(x=resolution, y=resolution, z=resolution)
         else:
-            size = [resolution, resolution]
+            size = PISOtorch.Int4(x=resolution, y=resolution)
             
         block = domain.CreateBlockWithSize(size, name=f"TurbulenceBlock_{resolution}")
         
         # Set all boundaries to periodic
-        for boundary_name in ["-x", "+x", "-y", "+y"] + (["-z", "+z"] if dims == 3 else []):
-            block.setBoundary(boundary_name, PISOtorch.BoundaryType.PERIODIC)
+        if dims == 3:
+            block.MakePeriodic("x")
+            block.MakePeriodic("y") 
+            block.MakePeriodic("z")
+        else:
+            block.MakePeriodic("x")
+            block.MakePeriodic("y")
         
         return domain, block
     
     def generate_initial_turbulence(self, domain, block):
         """Generate initial turbulent velocity field"""
         dims = domain.getSpatialDims()
-        block_size = block.getSize()
+        block_size = block.getSizes()
         
         # Generate random velocity field
         if dims == 3:
-            shape = [1, dims] + list(block_size.tolist())[::-1]  # [1, 3, z, y, x]
+            shape = [1, dims, block_size.z, block_size.y, block_size.x]  # [1, 3, z, y, x]
         else:
-            shape = [1, dims] + list(block_size.tolist())[::-1]  # [1, 2, y, x]
+            shape = [1, dims, block_size.y, block_size.x]  # [1, 2, y, x]
         
         # Create Gaussian random field
         velocity = torch.randn(shape, dtype=self.dtype, device=cuda_device)
@@ -120,13 +125,15 @@ class TurbulenceDataGenerator:
         
         return velocity_filtered
     
-    def run_simulation(self, domain, resolution, steps, save_interval=50):
-        """Run turbulence simulation and collect data"""
+    def run_simulation(self, domain, resolution, steps, save_interval):
+        """Run simulation and collect velocity trajectory data"""
+        time_step = self.get_time_step(resolution)
+        
         self.logger.info(f"Running simulation at {resolution}^{domain.getSpatialDims()} resolution for {steps} steps")
         
-        # Calculate time step based on CFL condition
-        dx = (2 * np.pi * self.args.domain_scale) / resolution
-        time_step = self.args.cfl_safety_factor * dx / self.args.max_velocity
+        # Create log directory for main simulation
+        log_dir = Path(self.args.save_dir) / f"simulation_logs_{resolution}"
+        log_dir.mkdir(parents=True, exist_ok=True)
         
         # Create simulation
         sim = PISOtorch_simulation.Simulation(
@@ -138,7 +145,7 @@ class TurbulenceDataGenerator:
             pressure_tol=1e-6,
             velocity_corrector="FD",
             log_interval=save_interval,
-            log_dir=None,  # No intermediate logging
+            log_dir=str(log_dir),
             stop_fn=lambda: False
         )
         
@@ -159,12 +166,16 @@ class TurbulenceDataGenerator:
         return np.array(trajectory_data)
     
     def warmup_simulation(self, domain, resolution):
-        """Run warmup simulation to reach statistical steady state"""
-        warmup_steps = int(self.args.warmup_time / self.get_time_step(resolution))
+        """Run warmup simulation to reach statistically steady state"""
+        warmup_time = self.args.warmup_time
+        time_step = self.get_time_step(resolution)
+        warmup_steps = int(warmup_time / time_step)
+        
         self.logger.info(f"Running warmup for {warmup_steps} steps at resolution {resolution}")
         
-        dx = (2 * np.pi * self.args.domain_scale) / resolution
-        time_step = self.args.cfl_safety_factor * dx / self.args.max_velocity
+        # Create log directory for warmup simulation
+        log_dir = Path(self.args.save_dir) / "warmup_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
         
         sim = PISOtorch_simulation.Simulation(
             domain=domain,
@@ -175,7 +186,7 @@ class TurbulenceDataGenerator:
             pressure_tol=1e-6,
             velocity_corrector="FD",
             log_interval=max(warmup_steps // 10, 1),
-            log_dir=None,
+            log_dir=str(log_dir),
             stop_fn=lambda: False
         )
         
@@ -197,7 +208,8 @@ class TurbulenceDataGenerator:
         else:  # 2D: [1, 2, y, x]
             downsampled = velocity_hr[:, :, ::factor, ::factor]
         
-        return downsampled
+        # Make tensor contiguous in memory
+        return downsampled.contiguous()
     
     def generate_data(self):
         """Main data generation pipeline"""
