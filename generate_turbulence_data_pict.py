@@ -66,10 +66,124 @@ class TurbulenceDataGenerator:
         
         return domain, block
     
+    def _generate_divergence_free_field(self, shape, peak_wavenumber):
+        """Generate divergence-free velocity field using proper spectral method"""
+        # Create wavenumber grids
+        if len(shape) == 5:  # 3D
+            nz, ny, nx = shape[2], shape[3], shape[4]
+            kz = torch.fft.fftfreq(nz, device=cuda_device)
+            ky = torch.fft.fftfreq(ny, device=cuda_device)
+            kx = torch.fft.fftfreq(nx, device=cuda_device)
+            KZ, KY, KX = torch.meshgrid(kz, ky, kx, indexing='ij')
+            k_mag = torch.sqrt(KX**2 + KY**2 + KZ**2)
+            
+            # Create random potential in Fourier space
+            potential_fft = torch.complex(
+                torch.randn(nz, ny, nx, device=cuda_device),
+                torch.randn(nz, ny, nx, device=cuda_device)
+            )
+            
+        else:  # 2D
+            ny, nx = shape[2], shape[3]
+            ky = torch.fft.fftfreq(ny, device=cuda_device)
+            kx = torch.fft.fftfreq(nx, device=cuda_device)
+            KY, KX = torch.meshgrid(ky, kx, indexing='ij')
+            k_mag = torch.sqrt(KX**2 + KY**2)
+            
+            # For 2D, use streamfunction to ensure divergence-free field
+            streamfunction_fft = torch.complex(
+                torch.randn(ny, nx, device=cuda_device),
+                torch.randn(ny, nx, device=cuda_device)
+            )
+        
+        # Apply realistic turbulence spectrum (Kolmogorov-like)
+        # E(k) ~ k^(-5/3), so velocity ~ k^(-5/6)
+        k_scaled = k_mag / (peak_wavenumber / 4.0)  # Scale relative to peak
+        
+        # Von Karman-like spectrum with proper energy distribution
+        energy_spectrum = (k_scaled**4) / (1 + k_scaled**2)**(17/6)
+        
+        # Add exponential cutoff for high wavenumbers
+        energy_spectrum *= torch.exp(-(k_scaled / 2.0)**2)
+        
+        # Remove DC component
+        energy_spectrum[k_mag < 1e-10] = 0
+        
+        # Apply spectrum to create realistic turbulence
+        if len(shape) == 5:  # 3D
+            # Generate velocity from vector potential curl
+            # u = ∇ × A ensures ∇ · u = 0
+            potential_fft *= torch.sqrt(energy_spectrum)
+            
+            # Apply different random phases for each component
+            Ax_fft = potential_fft * torch.exp(1j * 2 * np.pi * torch.rand_like(k_mag))
+            Ay_fft = potential_fft * torch.exp(1j * 2 * np.pi * torch.rand_like(k_mag))
+            Az_fft = potential_fft * torch.exp(1j * 2 * np.pi * torch.rand_like(k_mag))
+            
+            # Compute velocity as curl of vector potential: u = ∇ × A
+            # ux = ∂Az/∂y - ∂Ay/∂z
+            # uy = ∂Ax/∂z - ∂Az/∂x  
+            # uz = ∂Ay/∂x - ∂Ax/∂y
+            ux_fft = 1j * (2*np.pi) * (KY * Az_fft - KZ * Ay_fft)
+            uy_fft = 1j * (2*np.pi) * (KZ * Ax_fft - KX * Az_fft)
+            uz_fft = 1j * (2*np.pi) * (KX * Ay_fft - KY * Ax_fft)
+            
+            # Convert back to physical space
+            ux = torch.fft.ifftn(ux_fft).real
+            uy = torch.fft.ifftn(uy_fft).real
+            uz = torch.fft.ifftn(uz_fft).real
+            
+            velocity = torch.stack([ux, uy, uz], dim=0).unsqueeze(0)
+            
+        else:  # 2D
+            # For 2D: u = (-∂ψ/∂y, ∂ψ/∂x) ensures ∇ · u = 0
+            streamfunction_fft *= torch.sqrt(energy_spectrum)
+            
+            # Compute velocity components from streamfunction
+            ux_fft = -1j * (2*np.pi) * KY * streamfunction_fft
+            uy_fft = 1j * (2*np.pi) * KX * streamfunction_fft
+            
+            # Convert back to physical space
+            ux = torch.fft.ifftn(ux_fft).real
+            uy = torch.fft.ifftn(uy_fft).real
+            
+            velocity = torch.stack([ux, uy], dim=0).unsqueeze(0)
+        
+        return velocity.to(dtype=self.dtype)
+    
+    def _verify_divergence_free(self, velocity, resolution):
+        """Verify that the velocity field is divergence-free"""
+        if velocity.shape[1] < 2:  # Need at least 2D
+            return 0.0
+            
+        # Extract velocity components
+        u = velocity[0, 0, :, :] if len(velocity.shape) == 4 else velocity[0, 0, :, :]
+        v = velocity[0, 1, :, :] if len(velocity.shape) == 4 else velocity[0, 1, :, :]
+        
+        # Compute derivatives using finite differences (periodic boundaries)
+        dx = 2 * np.pi * self.args.domain_scale / resolution
+        
+        # Central differences with periodic boundary conditions
+        du_dx = (torch.roll(u, -1, dim=1) - torch.roll(u, 1, dim=1)) / (2 * dx)
+        dv_dy = (torch.roll(v, -1, dim=0) - torch.roll(v, 1, dim=0)) / (2 * dx)
+        
+        # Compute divergence
+        divergence = du_dx + dv_dy
+        
+        # Return RMS divergence
+        div_rms = torch.sqrt(torch.mean(divergence**2)).item()
+        
+        return div_rms
+    
     def generate_initial_turbulence(self, domain, block):
-        """Generate initial turbulent velocity field"""
+        """Generate initial turbulent velocity field with proper divergence-free constraint"""
         dims = domain.getSpatialDims()
         block_size = block.getSizes()
+        
+        # Get resolution for verification
+        resolution = block_size.x if dims == 2 else block_size.x
+        
+        self.logger.info(f"Generating divergence-free turbulent field for {resolution}^{dims} domain")
         
         # Generate random velocity field
         if dims == 3:
@@ -77,53 +191,32 @@ class TurbulenceDataGenerator:
         else:
             shape = [1, dims, block_size.y, block_size.x]  # [1, 2, y, x]
         
-        # Create Gaussian random field
-        velocity = torch.randn(shape, dtype=self.dtype, device=cuda_device)
+        # Create divergence-free velocity field using vector potential method
+        velocity = self._generate_divergence_free_field(shape, self.args.peak_wavenumber)
         
-        # Apply spectral filtering to get realistic turbulence
-        velocity = self._apply_spectral_filter(velocity, self.args.peak_wavenumber)
+        # Verify divergence-free property
+        if dims == 2:
+            div_rms = self._verify_divergence_free(velocity, resolution)
+            self.logger.info(f"Initial velocity field RMS divergence: {div_rms:.2e}")
         
         # Scale to desired maximum velocity
         velocity_magnitude = torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))
-        max_vel = torch.max(velocity_magnitude)
+        max_vel = torch.max(velocity_magnitude).item()
+        mean_vel = torch.mean(velocity_magnitude).item()
+        
+        self.logger.info(f"Velocity statistics before scaling - Max: {max_vel:.3f}, Mean: {mean_vel:.3f}")
+        
         velocity = velocity * (self.args.max_velocity / max_vel)
+        
+        # Log final statistics
+        final_max = torch.max(torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))).item()
+        final_mean = torch.mean(torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))).item()
+        self.logger.info(f"Velocity statistics after scaling - Max: {final_max:.3f}, Mean: {final_mean:.3f}")
         
         # Set velocity field
         block.setVelocity(velocity)
         
         return velocity
-    
-    def _apply_spectral_filter(self, velocity, peak_wavenumber):
-        """Apply spectral filtering to create realistic turbulence spectrum"""
-        # Convert to frequency domain
-        velocity_fft = torch.fft.fftn(velocity, dim=list(range(2, velocity.ndim)))
-        
-        # Create wavenumber grid
-        shape = velocity.shape[2:]
-        if len(shape) == 3:  # 3D
-            kz = torch.fft.fftfreq(shape[0], device=cuda_device)
-            ky = torch.fft.fftfreq(shape[1], device=cuda_device) 
-            kx = torch.fft.fftfreq(shape[2], device=cuda_device)
-            KZ, KY, KX = torch.meshgrid(kz, ky, kx, indexing='ij')
-            k_mag = torch.sqrt(KX**2 + KY**2 + KZ**2)
-        else:  # 2D
-            ky = torch.fft.fftfreq(shape[0], device=cuda_device)
-            kx = torch.fft.fftfreq(shape[1], device=cuda_device)
-            KY, KX = torch.meshgrid(ky, kx, indexing='ij')
-            k_mag = torch.sqrt(KX**2 + KY**2)
-        
-        # Apply Kolmogorov-like spectrum filter
-        # E(k) ~ k^(-5/3) for inertial range
-        filter_func = torch.exp(-(k_mag / peak_wavenumber)**2) * (k_mag + 1e-8)**(-5/6)
-        filter_func[k_mag == 0] = 0  # Remove DC component
-        
-        # Apply filter
-        velocity_fft = velocity_fft * filter_func.unsqueeze(0).unsqueeze(0)
-        
-        # Convert back to physical space
-        velocity_filtered = torch.fft.ifftn(velocity_fft, dim=list(range(2, velocity.ndim))).real
-        
-        return velocity_filtered
     
     def run_simulation(self, domain, resolution, steps, save_interval):
         """Run simulation and collect velocity trajectory data"""
