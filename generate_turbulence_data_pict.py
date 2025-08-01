@@ -151,6 +151,54 @@ class TurbulenceDataGenerator:
         
         return velocity.to(dtype=self.dtype)
     
+    def load_initial_velocity_from_training_data(self, resolution):
+        """Load initial velocity field from existing training data"""
+        # Construct path to training data file
+        training_data_dir = Path(self.args.training_data_dir)
+        data_file = training_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
+        
+        if not data_file.exists():
+            self.logger.warning(f"Training data file not found: {data_file}")
+            self.logger.info("Falling back to generated initial conditions")
+            return None
+            
+        self.logger.info(f"Loading initial velocity from: {data_file}")
+        
+        # Load the data
+        data = np.load(data_file)
+        u_data = data['u']  # Shape: [time, y, x]
+        v_data = data['v']  # Shape: [time, y, x]
+        
+        # Extract t=0 velocity field
+        u_t0 = u_data[0, :, :]  # [y, x]
+        v_t0 = v_data[0, :, :]  # [y, x]
+        
+        # Convert to PICT format: [1, channels, y, x]
+        if self.args.dims == 3:
+            # For 3D, we need to add a z-component (set to zero for now)
+            w_t0 = np.zeros_like(u_t0)
+            velocity = np.stack([u_t0, v_t0, w_t0], axis=0)  # [3, y, x]
+            velocity = velocity[np.newaxis, :]  # [1, 3, y, x]
+        else:
+            # For 2D
+            velocity = np.stack([u_t0, v_t0], axis=0)  # [2, y, x]
+            velocity = velocity[np.newaxis, :]  # [1, 2, y, x]
+        
+        # Convert to torch tensor
+        velocity_tensor = torch.from_numpy(velocity).to(dtype=self.dtype, device=cuda_device)
+        
+        # Log statistics
+        max_vel = torch.max(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
+        mean_vel = torch.mean(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
+        self.logger.info(f"Loaded velocity statistics - Max: {max_vel:.3f}, Mean: {mean_vel:.3f}")
+        
+        # Verify divergence if 2D
+        if self.args.dims == 2:
+            div_rms = self._verify_divergence_free(velocity_tensor, resolution)
+            self.logger.info(f"Loaded velocity field RMS divergence: {div_rms:.2e}")
+        
+        return velocity_tensor
+    
     def _verify_divergence_free(self, velocity, resolution):
         """Verify that the velocity field is divergence-free"""
         if velocity.shape[1] < 2:  # Need at least 2D
@@ -308,15 +356,41 @@ class TurbulenceDataGenerator:
         """Main data generation pipeline"""
         self.logger.info("Starting turbulence data generation with PICT")
         
+        # Check if we should use training data for initialization
+        use_training_data_init = getattr(self.args, 'use_training_data_init', False)
+        
+        if use_training_data_init:
+            self.logger.info("Using training data for initialization (skipping warmup)")
+        else:
+            self.logger.info("Using generated initial conditions with warmup")
+        
         # Create high-resolution domain for initial conditions
         hr_domain, hr_block = self.create_domain(self.args.high_res)
         
-        # Generate initial turbulent field
-        initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
-        hr_domain.PrepareSolve()
-        
-        # Run warmup at high resolution
-        self.warmup_simulation(hr_domain, self.args.high_res)
+        if use_training_data_init:
+            # Try to load initial velocity from training data
+            initial_velocity = self.load_initial_velocity_from_training_data(self.args.high_res)
+            
+            if initial_velocity is not None:
+                # Set the loaded velocity field
+                hr_block.setVelocity(initial_velocity)
+                hr_domain.PrepareSolve()
+                self.logger.info("Successfully initialized from training data")
+            else:
+                # Fallback to generated initial conditions
+                self.logger.info("Falling back to generated initial conditions")
+                initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
+                hr_domain.PrepareSolve()
+                
+                # Run warmup since we're using generated conditions
+                self.warmup_simulation(hr_domain, self.args.high_res)
+        else:
+            # Original approach: generate initial turbulent field
+            initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
+            hr_domain.PrepareSolve()
+            
+            # Run warmup at high resolution
+            self.warmup_simulation(hr_domain, self.args.high_res)
         
         # Get resolutions to generate
         resolution_list = []
@@ -336,13 +410,30 @@ class TurbulenceDataGenerator:
                 # Create domain at target resolution
                 domain, block = self.create_domain(resolution)
                 
-                # Downsample velocity from high-res
-                hr_velocity = hr_domain.getBlock(0).velocity
-                downsampled_velocity = self.downsample_velocity(
-                    hr_velocity, resolution, self.args.high_res
-                )
-                block.setVelocity(downsampled_velocity)
-                domain.PrepareSolve()
+                if use_training_data_init:
+                    # Try to load velocity for this resolution
+                    target_velocity = self.load_initial_velocity_from_training_data(resolution)
+                    
+                    if target_velocity is not None:
+                        # Use loaded velocity for this resolution
+                        block.setVelocity(target_velocity)
+                        domain.PrepareSolve()
+                    else:
+                        # Fallback to downsampling from high-res
+                        hr_velocity = hr_domain.getBlock(0).velocity
+                        downsampled_velocity = self.downsample_velocity(
+                            hr_velocity, resolution, self.args.high_res
+                        )
+                        block.setVelocity(downsampled_velocity)
+                        domain.PrepareSolve()
+                else:
+                    # Original approach: downsample from high-res
+                    hr_velocity = hr_domain.getBlock(0).velocity
+                    downsampled_velocity = self.downsample_velocity(
+                        hr_velocity, resolution, self.args.high_res
+                    )
+                    block.setVelocity(downsampled_velocity)
+                    domain.PrepareSolve()
             
             # Run simulation and collect trajectory
             trajectory = self.run_simulation(
@@ -405,6 +496,23 @@ class TurbulenceDataGenerator:
 
 
 def main():
+    """
+    Main function for PICT turbulence data generation.
+    
+    Usage examples:
+    
+    1. Generate data using training data for initialization (NEW - no warmup needed):
+    python generate_turbulence_data_pict.py --use_training_data_init --training_data_dir "./training_data" --generate_steps 5000 --save_file "pict_from_training"
+    
+    2. Generate training data with original method:
+    python generate_turbulence_data_pict.py --generate_steps 5000 --high_res 512 --save_file "turbulence_training"
+    
+    3. Quick test with training data initialization:
+    python generate_turbulence_data_pict.py --use_training_data_init --generate_steps 100 --high_res 256 --low_res 64
+    
+    4. Use custom training data directory:
+    python generate_turbulence_data_pict.py --use_training_data_init --training_data_dir "/path/to/your/training_data" --generate_steps 1000
+    """
     parser = argparse.ArgumentParser(description='Generate turbulence training data using PICT')
     
     # Simulation parameters
@@ -434,6 +542,12 @@ def main():
     parser.add_argument('--save_dir', type=str, default='./data/pict_turbulence')
     parser.add_argument('--save_file', type=str, default="decaying_turbulence")
     parser.add_argument('--save_index', type=int, default=1)
+    
+    # Training data initialization
+    parser.add_argument('--use_training_data_init', action='store_true', default=False,
+                       help='Use training data t=0 velocity for initialization (skips warmup)')
+    parser.add_argument('--training_data_dir', type=str, default='./training_data',
+                       help='Directory containing training data files')
     
     args = parser.parse_args()
     
