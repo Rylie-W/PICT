@@ -212,8 +212,8 @@ class TurbulenceDataGenerator:
         dx = 2 * np.pi * self.args.domain_scale / resolution
         
         # Central differences with periodic boundary conditions
-        du_dx = (torch.roll(u, -1, dim=1) - torch.roll(u, 1, dim=1)) / (2 * dx)
-        dv_dy = (torch.roll(v, -1, dim=0) - torch.roll(v, 1, dim=0)) / (2 * dx)
+        du_dx = (torch.roll(u, -1, dims=1) - torch.roll(u, 1, dims=1)) / (2 * dx)
+        dv_dy = (torch.roll(v, -1, dims=0) - torch.roll(v, 1, dims=0)) / (2 * dx)
         
         # Compute divergence
         divergence = du_dx + dv_dy
