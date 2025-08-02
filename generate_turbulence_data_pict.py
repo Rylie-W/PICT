@@ -160,7 +160,7 @@ class TurbulenceDataGenerator:
         if not data_file.exists():
             self.logger.warning(f"Training data file not found: {data_file}")
             self.logger.info("Falling back to generated initial conditions")
-            return None
+            return None, None
             
         self.logger.info(f"Loading initial velocity from: {data_file}")
         
@@ -168,6 +168,53 @@ class TurbulenceDataGenerator:
         data = np.load(data_file)
         u_data = data['u']  # Shape: [time, y, x]
         v_data = data['v']  # Shape: [time, y, x]
+        
+        # Extract timestep information from training data
+        training_timestep = None
+        
+        # Check for delta_t (the actual timestep field in our training data)
+        if 'delta_t' in data.keys():
+            training_timestep = float(data['delta_t'])
+            self.logger.info(f"Found delta_t timestep in training data: {training_timestep}")
+        elif 'timestep' in data.keys():
+            # Alternative timestep field name
+            training_timestep = float(data['timestep'])
+            self.logger.info(f"Found explicit timestep in training data: {training_timestep}")
+        elif 'dt' in data.keys():
+            # Another alternative timestep field name
+            training_timestep = float(data['dt'])
+            self.logger.info(f"Found dt timestep in training data: {training_timestep}")
+        elif 'time_array' in data.keys():
+            # If time_array is stored, calculate timestep from it
+            time_array = data['time_array']
+            if len(time_array) > 1:
+                training_timestep = float(time_array[1] - time_array[0])
+                self.logger.info(f"Calculated timestep from time_array: {training_timestep}")
+        elif 'time' in data.keys():
+            # Fallback to 'time' field
+            time_array = data['time']
+            if len(time_array) > 1:
+                training_timestep = float(time_array[1] - time_array[0])
+                self.logger.info(f"Calculated timestep from time array: {training_timestep}")
+        else:
+            # Try to infer timestep from number of time steps and total simulation time
+            num_timesteps = u_data.shape[0]
+            if 'total_time' in data.keys():
+                total_time = float(data['total_time'])
+                training_timestep = total_time / (num_timesteps - 1)
+                self.logger.info(f"Inferred timestep from total time: {training_timestep}")
+            else:
+                # Last resort: use default or computed timestep 
+                self.logger.warning("Could not extract timestep from training data, will use computed timestep")
+                
+        # Log additional information about the training data
+        if 'time_array' in data.keys():
+            time_array = data['time_array']
+            total_time = time_array[-1] - time_array[0]
+            self.logger.info(f"Training data time range: {time_array[0]:.6f} to {time_array[-1]:.6f} (total: {total_time:.6f})")
+            
+        if 'outer_steps' in data.keys():
+            self.logger.info(f"Training data outer steps: {data['outer_steps']}")
         
         # Extract t=0 velocity field
         u_t0 = u_data[0, :, :]  # [y, x]
@@ -197,7 +244,7 @@ class TurbulenceDataGenerator:
             div_rms = self._verify_divergence_free(velocity_tensor, resolution)
             self.logger.info(f"Loaded velocity field RMS divergence: {div_rms:.2e}")
         
-        return velocity_tensor
+        return velocity_tensor, training_timestep
     
     def _verify_divergence_free(self, velocity, resolution):
         """Verify that the velocity field is divergence-free"""
@@ -266,9 +313,14 @@ class TurbulenceDataGenerator:
         
         return velocity
     
-    def run_simulation(self, domain, resolution, steps, save_interval):
+    def run_simulation(self, domain, resolution, steps, save_interval, training_timestep=None):
         """Run simulation and collect velocity trajectory data"""
-        time_step = self.get_time_step(resolution)
+        if training_timestep is not None:
+            time_step = training_timestep
+            self.logger.info(f"Using training data timestep: {time_step}")
+        else:
+            time_step = self.get_time_step(resolution)
+            self.logger.info(f"Using computed timestep: {time_step}")
         
         self.logger.info(f"Running simulation at {resolution}^{domain.getSpatialDims()} resolution for {steps} steps")
         
@@ -292,6 +344,8 @@ class TurbulenceDataGenerator:
         
         # Storage for trajectory data
         trajectory_data = []
+        velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
+        trajectory_data.append(velocity.copy())
         
         # Run simulation and collect data
         for step in range(0, steps, save_interval):
@@ -366,16 +420,19 @@ class TurbulenceDataGenerator:
         
         # Create high-resolution domain for initial conditions
         hr_domain, hr_block = self.create_domain(self.args.high_res)
+        hr_training_timestep = None
         
         if use_training_data_init:
             # Try to load initial velocity from training data
-            initial_velocity = self.load_initial_velocity_from_training_data(self.args.high_res)
+            initial_velocity, hr_training_timestep = self.load_initial_velocity_from_training_data(self.args.high_res)
             
             if initial_velocity is not None:
                 # Set the loaded velocity field
                 hr_block.setVelocity(initial_velocity)
                 hr_domain.PrepareSolve()
                 self.logger.info("Successfully initialized from training data")
+                if hr_training_timestep is not None:
+                    self.logger.info(f"Will use training data timestep: {hr_training_timestep}")
             else:
                 # Fallback to generated initial conditions
                 self.logger.info("Falling back to generated initial conditions")
@@ -402,22 +459,27 @@ class TurbulenceDataGenerator:
         # Generate data for each resolution
         for resolution in resolution_list:
             self.logger.info(f"Generating data for resolution {resolution}")
+            current_training_timestep = None
             
             if resolution == self.args.high_res:
                 # Use existing high-res domain
                 domain = hr_domain
+                current_training_timestep = hr_training_timestep
             else:
                 # Create domain at target resolution
                 domain, block = self.create_domain(resolution)
                 
                 if use_training_data_init:
                     # Try to load velocity for this resolution
-                    target_velocity = self.load_initial_velocity_from_training_data(resolution)
+                    target_velocity, current_training_timestep = self.load_initial_velocity_from_training_data(resolution)
                     
                     if target_velocity is not None:
                         # Use loaded velocity for this resolution
+                        self.logger.info(f"Using loaded velocity for resolution {resolution}")
                         block.setVelocity(target_velocity)
                         domain.PrepareSolve()
+                        if current_training_timestep is not None:
+                            self.logger.info(f"Using training timestep {current_training_timestep} for resolution {resolution}")
                     else:
                         # Fallback to downsampling from high-res
                         hr_velocity = hr_domain.getBlock(0).velocity
@@ -426,6 +488,8 @@ class TurbulenceDataGenerator:
                         )
                         block.setVelocity(downsampled_velocity)
                         domain.PrepareSolve()
+                        # Use high-res timestep if available, otherwise computed
+                        current_training_timestep = hr_training_timestep
                 else:
                     # Original approach: downsample from high-res
                     hr_velocity = hr_domain.getBlock(0).velocity
@@ -438,13 +502,14 @@ class TurbulenceDataGenerator:
             # Run simulation and collect trajectory
             trajectory = self.run_simulation(
                 domain, resolution, self.args.generate_steps, 
-                save_interval=self.args.save_interval
+                save_interval=self.args.save_interval,
+                training_timestep=current_training_timestep
             )
             
             # Save data
-            self.save_trajectory_data(trajectory, resolution)
+            self.save_trajectory_data(trajectory, resolution, current_training_timestep)
     
-    def save_trajectory_data(self, trajectory, resolution):
+    def save_trajectory_data(self, trajectory, resolution, timestep=None):
         """Save trajectory data in numpy format"""
         save_dir = Path(self.args.save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
@@ -452,6 +517,17 @@ class TurbulenceDataGenerator:
         data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_index_{self.args.save_index}.npz"
         
         self.logger.info(f"Saving training data to: {data_file}")
+        
+        # Calculate timestep if not provided
+        if timestep is None:
+            timestep = self.get_time_step(resolution)
+            self.logger.info(f"Using computed timestep for saving: {timestep}")
+        else:
+            self.logger.info(f"Using training data timestep for saving: {timestep}")
+        
+        # Create time array based on timestep
+        num_timesteps = trajectory.shape[0]
+        time_array = np.arange(num_timesteps) * timestep
         
         # Extract velocity components
         if trajectory.shape[2] == 3:  # 3D
@@ -464,6 +540,9 @@ class TurbulenceDataGenerator:
                 u=u_data,
                 v=v_data,
                 w=w_data,
+                time_array=time_array,  # Use consistent field name with training data
+                delta_t=timestep,       # Use consistent field name with training data
+                outer_steps=num_timesteps,
                 resolution=resolution,
                 steps=self.args.generate_steps,
                 warmup_time=self.args.warmup_time,
@@ -471,7 +550,11 @@ class TurbulenceDataGenerator:
                 viscosity=self.args.viscosity,
                 decay=self.args.decay,
                 seed=self.args.seed,
-                dims=3
+                dims=3,
+                # Additional metadata for compatibility
+                domain_scale=self.args.domain_scale,
+                cfl_safety_factor=self.args.cfl_safety_factor,
+                peak_wavenumber=self.args.peak_wavenumber
             )
         else:  # 2D
             u_data = trajectory[:, 0, 0, :, :]  # x-velocity
@@ -481,6 +564,9 @@ class TurbulenceDataGenerator:
                 data_file,
                 u=u_data,
                 v=v_data,
+                time_array=time_array,  # Use consistent field name with training data
+                delta_t=timestep,       # Use consistent field name with training data
+                outer_steps=num_timesteps,
                 resolution=resolution,
                 steps=self.args.generate_steps,
                 warmup_time=self.args.warmup_time,
@@ -488,30 +574,45 @@ class TurbulenceDataGenerator:
                 viscosity=self.args.viscosity,
                 decay=self.args.decay,
                 seed=self.args.seed,
-                dims=2
+                dims=2,
+                # Additional metadata for compatibility
+                domain_scale=self.args.domain_scale,
+                cfl_safety_factor=self.args.cfl_safety_factor,
+                peak_wavenumber=self.args.peak_wavenumber
             )
         
         self.logger.info(f"Saved trajectory shape: {trajectory.shape}")
         self.logger.info(f"Resolution: {resolution}x{resolution}, Steps: {self.args.generate_steps}")
+        self.logger.info(f"Timestep: {timestep}, Total time: {time_array[-1]:.6f}")
 
 
 def main():
     """
     Main function for PICT turbulence data generation.
     
+    NEW FEATURE: The code now automatically extracts and uses timestep information 
+    from training data when --use_training_data_init is enabled. This ensures 
+    that PICT simulations use the same temporal resolution as the training data.
+    
     Usage examples:
     
-    1. Generate data using training data for initialization (NEW - no warmup needed):
+    1. Generate data using training data for initialization and timestep (NEW):
     python generate_turbulence_data_pict.py --use_training_data_init --training_data_dir "./training_data" --generate_steps 5000 --save_file "pict_from_training"
     
     2. Generate training data with original method:
     python generate_turbulence_data_pict.py --generate_steps 5000 --high_res 512 --save_file "turbulence_training"
     
-    3. Quick test with training data initialization:
+    3. Quick test with training data initialization and timestep:
     python generate_turbulence_data_pict.py --use_training_data_init --generate_steps 100 --high_res 256 --low_res 64
     
     4. Use custom training data directory:
     python generate_turbulence_data_pict.py --use_training_data_init --training_data_dir "/path/to/your/training_data" --generate_steps 1000
+    
+    Training data timestep extraction:
+    - Looks for 'timestep' field in training data files
+    - Falls back to calculating from 'time' array if available
+    - Uses computed timestep if training data timestep cannot be extracted
+    - Saves timestep information in generated data files for consistency
     """
     parser = argparse.ArgumentParser(description='Generate turbulence training data using PICT')
     
@@ -519,10 +620,10 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--dims', type=int, default=2, choices=[2, 3], 
                        help='Spatial dimensions (2D or 3D)')
-    parser.add_argument('--generate_steps', type=int, default=12200)
+    parser.add_argument('--generate_steps', type=int, default=50)
     parser.add_argument('--save_interval', type=int, default=1,
                        help='Save data every N simulation steps')
-    parser.add_argument('--warmup_time', type=float, default=4.0)
+    parser.add_argument('--warmup_time', type=float, default=0.0)
     
     # Physical parameters
     parser.add_argument('--max_velocity', type=float, default=4.2)
@@ -535,7 +636,7 @@ def main():
     
     # Resolution parameters
     parser.add_argument('--low_res', type=int, default=64)
-    parser.add_argument('--high_res', type=int, default=512,  # Reduced from 2048 for PICT
+    parser.add_argument('--high_res', type=int, default=256,  # Reduced from 2048 for PICT
                        help='Highest resolution (limited by GPU memory)')
     
     # Output parameters
@@ -544,7 +645,7 @@ def main():
     parser.add_argument('--save_index', type=int, default=1)
     
     # Training data initialization
-    parser.add_argument('--use_training_data_init', action='store_true', default=False,
+    parser.add_argument('--use_training_data_init', action='store_true', default=True,
                        help='Use training data t=0 velocity for initialization (skips warmup)')
     parser.add_argument('--training_data_dir', type=str, default='./training_data',
                        help='Directory containing training data files')
