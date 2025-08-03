@@ -620,7 +620,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--dims', type=int, default=2, choices=[2, 3], 
                        help='Spatial dimensions (2D or 3D)')
-    parser.add_argument('--generate_steps', type=int, default=50)
+    parser.add_argument('--generate_steps', type=int, default=12200)
     parser.add_argument('--save_interval', type=int, default=1,
                        help='Save data every N simulation steps')
     parser.add_argument('--warmup_time', type=float, default=0.0)
