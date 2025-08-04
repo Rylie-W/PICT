@@ -462,11 +462,9 @@ class TurbulenceDataGenerator:
             current_training_timestep = None
             
             if resolution == self.args.high_res:
-                # Use existing high-res domain
                 domain = hr_domain
                 current_training_timestep = hr_training_timestep
             else:
-                # Create domain at target resolution
                 domain, block = self.create_domain(resolution)
                 
                 if use_training_data_init:
@@ -499,14 +497,12 @@ class TurbulenceDataGenerator:
                     block.setVelocity(downsampled_velocity)
                     domain.PrepareSolve()
             
-            # Run simulation and collect trajectory
             trajectory = self.run_simulation(
                 domain, resolution, self.args.generate_steps, 
                 save_interval=self.args.save_interval,
                 training_timestep=current_training_timestep
             )
             
-            # Save data
             self.save_trajectory_data(trajectory, resolution, current_training_timestep)
     
     def save_trajectory_data(self, trajectory, resolution, timestep=None):
@@ -525,7 +521,6 @@ class TurbulenceDataGenerator:
         else:
             self.logger.info(f"Using training data timestep for saving: {timestep}")
         
-        # Create time array based on timestep
         num_timesteps = trajectory.shape[0]
         time_array = np.arange(num_timesteps) * timestep
         
@@ -551,7 +546,6 @@ class TurbulenceDataGenerator:
                 decay=self.args.decay,
                 seed=self.args.seed,
                 dims=3,
-                # Additional metadata for compatibility
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
                 peak_wavenumber=self.args.peak_wavenumber
@@ -575,7 +569,6 @@ class TurbulenceDataGenerator:
                 decay=self.args.decay,
                 seed=self.args.seed,
                 dims=2,
-                # Additional metadata for compatibility
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
                 peak_wavenumber=self.args.peak_wavenumber
