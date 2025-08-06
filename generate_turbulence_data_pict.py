@@ -495,6 +495,8 @@ class TurbulenceDataGenerator:
                         hr_velocity, resolution, self.args.high_res
                     )
                     block.setVelocity(downsampled_velocity)
+                    # domain.setBlock(block)
+                    domain.updateBlock(block)
                     domain.PrepareSolve()
             
             trajectory = self.run_simulation(
