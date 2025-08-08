@@ -475,6 +475,7 @@ class TurbulenceDataGenerator:
                         # Use loaded velocity for this resolution
                         self.logger.info(f"Using loaded velocity for resolution {resolution}")
                         block.setVelocity(target_velocity)
+                        domain.UpdateDomainData()
                         domain.PrepareSolve()
                         if current_training_timestep is not None:
                             self.logger.info(f"Using training timestep {current_training_timestep} for resolution {resolution}")
@@ -485,6 +486,7 @@ class TurbulenceDataGenerator:
                             hr_velocity, resolution, self.args.high_res
                         )
                         block.setVelocity(downsampled_velocity)
+                        domain.UpdateDomainData()
                         domain.PrepareSolve()
                         # Use high-res timestep if available, otherwise computed
                         current_training_timestep = hr_training_timestep
@@ -495,8 +497,7 @@ class TurbulenceDataGenerator:
                         hr_velocity, resolution, self.args.high_res
                     )
                     block.setVelocity(downsampled_velocity)
-                    # domain.setBlock(block)
-                    domain.updateBlock(block)
+                    domain.UpdateDomainData()
                     domain.PrepareSolve()
             
             trajectory = self.run_simulation(
