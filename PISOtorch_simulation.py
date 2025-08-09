@@ -7,6 +7,10 @@ import PISOtorch_diff
 #import PISOtorch_diff_old as PISOtorch_diff
 import numpy as np
 
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.gridspec import GridSpec
+
 assert torch.cuda.is_available()
 cuda_device = torch.device("cuda")
 cpu_device = torch.device("cpu")
@@ -983,10 +987,92 @@ class Simulation:
         
         domain = self.domain
         non_ortho_flags = self.__non_ortho_flags
+
+        # 添加可视化函数
+        def visualize_velocity(vel_tensor, stage, save_dir=None):
+            # 将velocity tensor转换为numpy数组
+            vel = vel_tensor.detach().cpu().numpy()
+            # 提取u和v分量
+            u = vel[0, 0]  # First channel (x-direction)
+            v = vel[0, 1]  # Second channel (y-direction)
+            
+            # 计算速度大小
+            magnitude = np.sqrt(u**2 + v**2)
+            
+            # 创建网格点
+            y, x = np.mgrid[0:u.shape[0], 0:u.shape[1]]
+            
+            # 创建图形
+            fig = plt.figure(figsize=(15, 5))
+            gs = GridSpec(1, 3, figure=fig)
+            
+            # 速度大小的热图
+            ax1 = fig.add_subplot(gs[0, 0])
+            im1 = ax1.imshow(magnitude, cmap='viridis')
+            plt.colorbar(im1, ax=ax1)
+            ax1.set_title('Velocity Magnitude')
+            
+            # u分量的热图
+            ax2 = fig.add_subplot(gs[0, 1])
+            im2 = ax2.imshow(u, cmap='RdBu', vmin=-np.max(np.abs(u)), vmax=np.max(np.abs(u)))
+            plt.colorbar(im2, ax=ax2)
+            ax2.set_title('U Component')
+            
+            # v分量的热图
+            ax3 = fig.add_subplot(gs[0, 2])
+            im3 = ax3.imshow(v, cmap='RdBu', vmin=-np.max(np.abs(v)), vmax=np.max(np.abs(v)))
+            plt.colorbar(im3, ax=ax3)
+            ax3.set_title('V Component')
+            
+            # 在所有子图上添加矢量场
+            skip = (slice(None, None, 4), slice(None, None, 4))
+            for ax in [ax1, ax2, ax3]:
+                ax.quiver(x[skip], y[skip], u[skip], v[skip], 
+                         scale=40, color='white', alpha=0.6)
+            
+            plt.suptitle(f'Velocity Field - {stage}')
+            plt.tight_layout()
+            
+            # 如果提供了保存目录，则保存图像
+            if save_dir is not None:
+                save_path = os.path.join(save_dir, f'velocity_{stage.replace(" ", "_")}.png')
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                plt.close()
+            else:
+                plt.show()
+                plt.close()
+
+        # 添加监控函数
+        def log_velocity_change(stage, old_vel=None, save_dir=None):
+            current_vel = domain.getBlock(0).velocity.detach().cpu()
+            if old_vel is not None:
+                max_diff = torch.max(torch.abs(current_vel - old_vel)).item()
+                mean_diff = torch.mean(torch.abs(current_vel - old_vel)).item()
+                print(f"{stage} - Max velocity change: {max_diff:.6f}, Mean change: {mean_diff:.6f}")
+                
+                # 可视化当前速度场
+                visualize_velocity(current_vel, stage, save_dir)
+                
+                # 可视化与上一步的差异
+                diff_vel = current_vel - old_vel
+                visualize_velocity(diff_vel, f"{stage} (Difference)", save_dir)
+                
+            return current_vel
+        
+        # 创建保存可视化结果的目录
+        if self.log_dir is not None:
+            vis_dir = os.path.join(self.log_dir, f'velocity_visualization_step_{self.total_step}')
+            os.makedirs(vis_dir, exist_ok=True)
+        else:
+            vis_dir = None
         
         for step in range(iterations):
             with SAMPLE("PISO step"):
-                #_LOG.info("Substep %d", step)
+                print(f"\n=== Starting PISO step {step} ===")
+                
+                # 记录初始状态
+                initial_velocity = log_velocity_change("Initial state", None, vis_dir)
+                
                 if self.convergence_tol is not None:
                     self.__backend.CopyVelocityResultFromBlocks(domain)
                     last_vel = domain.velocityResult.clone().detach()
@@ -1106,6 +1192,9 @@ class Simulation:
                         domain.setVelocityResult(velocityResult)
                         domain.UpdateDomainData()
                         
+                        # 记录对流步骤后的变化
+                        log_velocity_change("After advection", initial_velocity, vis_dir)
+                        
                     else:
                         self.__backend.CopyVelocityResultFromBlocks(domain) # needed for non-ortho components on RHS
                         
@@ -1138,8 +1227,12 @@ class Simulation:
                 if self._check_stop():
                     break
                 
+                # 记录修正步骤前的状态
+                pre_corrector_velocity = log_velocity_change("Before corrector steps", initial_velocity, vis_dir)
+                
                 for cstep in range(self.corrector_steps):
                     with SAMPLE("corrector step"):
+                        print(f"\n--- Corrector step {cstep} ---")
                         
                         if not self.non_orthogonal: # orthogonal version with gradient/backprop support
                             self.__backend.SetupPressureCorrection(domain, time_step, 0, pressure_use_face_transform, timeStepNorm=self.pressure_time_step_normalized)
@@ -1217,13 +1310,19 @@ class Simulation:
 
                         self.__backend.CorrectVelocity(domain, time_step, version=vcv, timeStepNorm=self.pressure_time_step_normalized) #vcv
 
+                        # 记录每个修正步骤后的变化
+                        log_velocity_change(f"After corrector step {cstep}", pre_corrector_velocity, vis_dir)
+                        
                         self._run_prep_fn("POST_VELOCITY_CORRECTION", domain=domain, local_step=step, time_step=time_step, total_step=self.total_step)
                             
                         if self._check_stop():
                             break
                 
                 self.__backend.CopyVelocityResultToBlocks(domain)
-
+                
+                # 记录整个时间步结束后的最终变化
+                log_velocity_change("End of PISO step", initial_velocity, vis_dir)
+                
                 self._run_prep_fn("POST", domain=domain, local_step=step, time_step=time_step, total_step=self.total_step)
                 
                 if self.convergence_tol is not None:
