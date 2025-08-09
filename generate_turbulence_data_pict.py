@@ -430,6 +430,7 @@ class TurbulenceDataGenerator:
                 # Set the loaded velocity field
                 hr_block.setVelocity(initial_velocity)
                 hr_domain.PrepareSolve()
+                hr_domain.UpdateDomainData()
                 self.logger.info("Successfully initialized from training data")
                 if hr_training_timestep is not None:
                     self.logger.info(f"Will use training data timestep: {hr_training_timestep}")
@@ -475,8 +476,8 @@ class TurbulenceDataGenerator:
                         # Use loaded velocity for this resolution
                         self.logger.info(f"Using loaded velocity for resolution {resolution}")
                         block.setVelocity(target_velocity)
-                        domain.UpdateDomainData()
                         domain.PrepareSolve()
+                        domain.UpdateDomainData()
                         if current_training_timestep is not None:
                             self.logger.info(f"Using training timestep {current_training_timestep} for resolution {resolution}")
                     else:
@@ -486,8 +487,8 @@ class TurbulenceDataGenerator:
                             hr_velocity, resolution, self.args.high_res
                         )
                         block.setVelocity(downsampled_velocity)
-                        domain.UpdateDomainData()
                         domain.PrepareSolve()
+                        domain.UpdateDomainData()
                         # Use high-res timestep if available, otherwise computed
                         current_training_timestep = hr_training_timestep
                 else:
@@ -497,8 +498,8 @@ class TurbulenceDataGenerator:
                         hr_velocity, resolution, self.args.high_res
                     )
                     block.setVelocity(downsampled_velocity)
-                    domain.UpdateDomainData()
                     domain.PrepareSolve()
+                    domain.UpdateDomainData()
             
             trajectory = self.run_simulation(
                 domain, resolution, self.args.generate_steps, 
