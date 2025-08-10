@@ -617,7 +617,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--dims', type=int, default=2, choices=[2, 3], 
                        help='Spatial dimensions (2D or 3D)')
-    parser.add_argument('--generate_steps', type=int, default=12200)
+    parser.add_argument('--generate_steps', type=int, default=5)
     parser.add_argument('--save_interval', type=int, default=1,
                        help='Save data every N simulation steps')
     parser.add_argument('--warmup_time', type=float, default=0.0)
@@ -633,7 +633,7 @@ def main():
     
     # Resolution parameters
     parser.add_argument('--low_res', type=int, default=64)
-    parser.add_argument('--high_res', type=int, default=256,  # Reduced from 2048 for PICT
+    parser.add_argument('--high_res', type=int, default=1024,  # Reduced from 2048 for PICT
                        help='Highest resolution (limited by GPU memory)')
     
     # Output parameters
