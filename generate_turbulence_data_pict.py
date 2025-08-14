@@ -498,8 +498,16 @@ class TurbulenceDataGenerator:
                         hr_velocity, resolution, self.args.high_res
                     )
                     block.setVelocity(downsampled_velocity)
-                    domain.PrepareSolve()
-                    domain.UpdateDomainData()
+
+                    domain.PrepareSolve() # 会分配/构建稀疏结构、缓冲区，并在内部调用一次 GPU 指针同步（SetupDomainGPU）。调用完后域已初始化且指针已对齐。
+                    domain.UpdateDomainData() # 只能在域已初始化后调用；它用来在你“改变了张量内容”（如 setVelocity / setVelocitySource / 设置 result 向量）之后刷新 GPU 侧指针/元数据。
+                    # 第一次/拓扑或边界结构变化后：
+                    # 先做所有结构与初值设置（如 block.setVelocity(...)）
+                    # 调用 domain.PrepareSolve()（完成初始化与一次同步）
+                    # 之后若又修改了任何张量，再调用 domain.UpdateDomainData()
+                    # 已初始化的域、仅改动场数据时：
+                    # 直接改（如 block.setVelocity(...)）
+                    # 然后 domain.UpdateDomainData()；不需要再 PrepareSolve()
             
             trajectory = self.run_simulation(
                 domain, resolution, self.args.generate_steps, 
