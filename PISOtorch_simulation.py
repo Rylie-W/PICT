@@ -362,7 +362,7 @@ class Simulation:
     __NON_ORTHO_MODE = NON_ORTHO_CENTER_MATRIX | NON_ORTHO_DIRECT_MATRIX | NON_ORTHO_DIAGONAL_RHS # Bit flags
     
     def __init__(self, domain:PISOtorch.Domain=None, *, time_step:float=1.0, substeps:int=1, corrector_steps:int=2, density_viscosity:float=None,
-           adaptive_CFL=0.8,
+           adaptive_CFL=0.8, visualize_max_steps:int=None,
            prep_fn=None, advection_use_BiCG:bool=True, pressure_use_BiCG:bool=False, scipy_solve_advection:bool=False, scipy_solve_pressure:bool=False,
            preconditionBiCG:bool=False, BiCG_precondition_fallback:bool=True, 
            advection_tol:float=None, pressure_tol:float=None, convergence_tol:float=None, solver_double_fallback:bool=False,
@@ -389,6 +389,7 @@ class Simulation:
         self.corrector_steps = corrector_steps
         self.convergence_tol = convergence_tol
         self.adaptive_CFL = adaptive_CFL
+        self.visualize_max_steps = visualize_max_steps
         
         self.scipy_solve_advection = scipy_solve_advection
         self.advection_use_BiCG = advection_use_BiCG
@@ -565,6 +566,17 @@ class Simulation:
         if not isinstance(adaptive_CFL, numbers.Real): raise TypeError("adaptive_CFL must be float.")
         if not adaptive_CFL>0: raise ValueError("adaptive_CFL must be positive.")
         self.__adaptive_CFL = adaptive_CFL
+    
+    @property
+    def visualize_max_steps(self):
+        return self.__visualize_max_steps
+    @visualize_max_steps.setter
+    def visualize_max_steps(self, visualize_max_steps):
+        if not (visualize_max_steps is None or isinstance(visualize_max_steps, numbers.Integral)):
+            raise TypeError("visualize_max_steps must be int or None.")
+        if visualize_max_steps is not None and visualize_max_steps<0:
+            raise ValueError("visualize_max_steps must be non-negative if set.")
+        self.__visualize_max_steps = visualize_max_steps
     
     @property
     def corrector_steps(self):
@@ -1232,6 +1244,10 @@ class Simulation:
         # 可视化控制参数
         enable_detailed_visualization = True  # 设置为False可以禁用详细可视化
         visualization_frequency = 1  # 每N个步骤保存一次可视化（1表示每步都保存）
+
+        # 如果设置了可视化步数上限，则超过上限后关闭可视化
+        if self.visualize_max_steps is not None and self.total_step >= self.visualize_max_steps:
+            enable_detailed_visualization = False
         
         # 创建保存可视化结果的目录
         if self.log_dir is not None and enable_detailed_visualization:
