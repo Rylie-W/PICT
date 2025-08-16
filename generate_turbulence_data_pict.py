@@ -332,11 +332,13 @@ class TurbulenceDataGenerator:
         sim = PISOtorch_simulation.Simulation(
             domain=domain,
             time_step=time_step,
-            substeps=1,
+            substeps="ADAPTIVE" if getattr(self.args, 'adaptive_timestep', False) else 1,
             corrector_steps=2,
             non_orthogonal=False,
             pressure_tol=1e-6,
             velocity_corrector="FD",
+            adaptive_CFL=getattr(self.args, 'adaptive_cfl', 0.8),
+            visualize_max_steps=getattr(self.args, 'visualize_max_steps', None),
             log_interval=save_interval,
             log_dir=str(log_dir),
             stop_fn=lambda: False
@@ -375,11 +377,13 @@ class TurbulenceDataGenerator:
         sim = PISOtorch_simulation.Simulation(
             domain=domain,
             time_step=time_step,
-            substeps=1,
+            substeps="ADAPTIVE" if getattr(self.args, 'adaptive_timestep', False) else 1,
             corrector_steps=2,
             non_orthogonal=False,
             pressure_tol=1e-6,
             velocity_corrector="FD",
+            adaptive_CFL=getattr(self.args, 'adaptive_cfl', 0.8),
+            visualize_max_steps=getattr(self.args, 'visualize_max_steps', None),
             log_interval=max(warmup_steps // 10, 1),
             log_dir=str(log_dir),
             stop_fn=lambda: False
@@ -625,7 +629,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--dims', type=int, default=2, choices=[2, 3], 
                        help='Spatial dimensions (2D or 3D)')
-    parser.add_argument('--generate_steps', type=int, default=5)
+    parser.add_argument('--generate_steps', type=int, default=3)
     parser.add_argument('--save_interval', type=int, default=1,
                        help='Save data every N simulation steps')
     parser.add_argument('--warmup_time', type=float, default=0.0)
@@ -639,9 +643,18 @@ def main():
     parser.add_argument('--decay', action='store_true', default=True,
                        help='Generate decaying turbulence (no forcing)')
     
+    # Adaptive timestep (CFL-based)
+    parser.add_argument('--adaptive_timestep', action='store_true', default=False,
+                       help='Enable adaptive timestep based on CFL condition')
+    parser.add_argument('--adaptive_cfl', type=float, default=0.5,
+                       help='Target CFL number for adaptive timestep')
+    parser.add_argument('--visualize_max_steps', type=int, default=5,
+                       help='Only visualize the first N steps (set None to disable limit)')
+    
     # Resolution parameters
-    parser.add_argument('--low_res', type=int, default=64)
-    parser.add_argument('--high_res', type=int, default=1024,  # Reduced from 2048 for PICT
+    parser.add_argument('--low_res', type=int, default=2048)
+
+    parser.add_argument('--high_res', type=int, default=2048,  # Reduced from 2048 for PICT
                        help='Highest resolution (limited by GPU memory)')
     
     # Output parameters
