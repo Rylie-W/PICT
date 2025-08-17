@@ -13,6 +13,9 @@ import lib.data.shapes as shapes
 from lib.util.logging import setup_run, get_logger, close_logging
 from lib.util.GPU_info import get_available_GPU_id
 
+# For comparison and visualization
+import matplotlib.colors as colors
+
 # Set GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = str(get_available_GPU_id(active_mem_threshold=0.8, default=None))
 
@@ -151,6 +154,182 @@ class TurbulenceDataGenerator:
         
         return velocity.to(dtype=self.dtype)
     
+    def load_initial_velocity_from_warmup_data(self, resolution):
+        """Load initial velocity field from warmup segment data"""
+        warmup_data_dir = Path(self.args.training_data_dir) / "warmup_data"
+        
+        # First try to load from warmup segment files (post-warmup data)
+        # Use the last segment as it represents the state after warmup completion
+        warmup_segment = getattr(self.args, 'warmup_segment', 6)  # Default to segment 6 (step 300)
+        segment_file = warmup_data_dir / f"decaying_turbulence_v2_warmup_segment_{warmup_segment}_step_{warmup_segment*50}_index_1.npz"
+        
+        if segment_file.exists():
+            self.logger.info(f"Loading initial velocity from warmup segment: {segment_file}")
+            data_file = segment_file
+        else:
+            # Fallback to resolution-based warmup data file if available
+            data_file = warmup_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
+            if data_file.exists():
+                self.logger.info(f"Loading initial velocity from warmup resolution data: {data_file}")
+            else:
+                self.logger.warning(f"Neither warmup segment nor resolution data found")
+                self.logger.info(f"Tried: {segment_file}")
+                self.logger.info(f"Tried: {data_file}")
+                self.logger.info("Falling back to regular training data")
+                return self.load_initial_velocity_from_training_data(resolution)
+            
+        self.logger.info(f"Loading initial velocity from warmup data: {data_file}")
+        
+        # Load the data
+        data = np.load(data_file)
+        u_data = data['u']  # Shape: [time, y, x]
+        v_data = data['v']  # Shape: [time, y, x]
+        
+        # Extract timestep information from warmup data
+        training_timestep = None
+        
+        # Check for delta_t (the actual timestep field in our training data)
+        if 'delta_t' in data.keys():
+            training_timestep = float(data['delta_t'])
+            self.logger.info(f"Found delta_t timestep in warmup data: {training_timestep}")
+        elif 'timestep' in data.keys():
+            # Alternative timestep field name
+            training_timestep = float(data['timestep'])
+            self.logger.info(f"Found explicit timestep in warmup data: {training_timestep}")
+        elif 'dt' in data.keys():
+            # Another alternative timestep field name
+            training_timestep = float(data['dt'])
+            self.logger.info(f"Found dt timestep in warmup data: {training_timestep}")
+        elif 'time_array' in data.keys():
+            # If time_array is stored, calculate timestep from it
+            time_array = data['time_array']
+            if len(time_array) > 1:
+                training_timestep = float(time_array[1] - time_array[0])
+                self.logger.info(f"Calculated timestep from time_array: {training_timestep}")
+        elif 'time' in data.keys():
+            # Fallback to 'time' field
+            time_array = data['time']
+            if len(time_array) > 1:
+                training_timestep = float(time_array[1] - time_array[0])
+                self.logger.info(f"Calculated timestep from time array: {training_timestep}")
+        else:
+            # Try to infer timestep from number of time steps and total simulation time
+            num_timesteps = u_data.shape[0]
+            if 'total_time' in data.keys():
+                total_time = float(data['total_time'])
+                training_timestep = total_time / (num_timesteps - 1)
+                self.logger.info(f"Inferred timestep from total time: {training_timestep}")
+            else:
+                # Last resort: use default or computed timestep 
+                self.logger.warning("Could not extract timestep from warmup data, will use computed timestep")
+                
+        # Log additional information about the warmup data
+        if 'time_array' in data.keys():
+            time_array = data['time_array']
+            total_time = time_array[-1] - time_array[0]
+            self.logger.info(f"Warmup data time range: {time_array[0]:.6f} to {time_array[-1]:.6f} (total: {total_time:.6f})")
+            
+        if 'outer_steps' in data.keys():
+            self.logger.info(f"Warmup data outer steps: {data['outer_steps']}")
+        
+        # Extract velocity field - handle different data structures
+        if len(u_data.shape) == 3:
+            # Regular training data format: [time, y, x]
+            u_t0 = u_data[0, :, :]  # [y, x]
+            v_t0 = v_data[0, :, :]  # [y, x]
+            self.logger.info("Using time=0 velocity from 3D data array")
+        elif len(u_data.shape) == 2:
+            # Warmup segment format: [y, x] - single snapshot
+            u_t0 = u_data  # [y, x]
+            v_t0 = v_data  # [y, x]
+            self.logger.info("Using velocity from 2D warmup segment data")
+        else:
+            self.logger.error(f"Unexpected data shape: u={u_data.shape}, v={v_data.shape}")
+            self.logger.info("Falling back to regular training data")
+            return self.load_initial_velocity_from_training_data(resolution)
+        
+        # Check if we need to resample the data to match target resolution
+        actual_resolution = u_t0.shape[0]  # Assuming square domain
+        self.logger.info(f"Warmup data resolution: {actual_resolution}x{actual_resolution}")
+        self.logger.info(f"Target resolution: {resolution}x{resolution}")
+        
+        if actual_resolution != resolution:
+            self.logger.info(f"Resampling warmup data from {actual_resolution}x{actual_resolution} to {resolution}x{resolution}")
+            # Simple resampling using scipy zoom
+            try:
+                from scipy.ndimage import zoom
+                zoom_factor = resolution / actual_resolution
+                u_t0 = zoom(u_t0, zoom_factor, order=1)  # Linear interpolation
+                v_t0 = zoom(v_t0, zoom_factor, order=1)
+                self.logger.info(f"Resampled velocity field to shape: {u_t0.shape}")
+            except ImportError:
+                self.logger.warning("scipy not available, using simple downsampling")
+                # Fallback to simple downsampling
+                if actual_resolution > resolution:
+                    factor = actual_resolution // resolution
+                    u_t0 = u_t0[::factor, ::factor]
+                    v_t0 = v_t0[::factor, ::factor]
+                else:
+                    self.logger.error(f"Cannot upsample from {actual_resolution} to {resolution} without scipy")
+                    self.logger.info("Falling back to regular training data")
+                    return self.load_initial_velocity_from_training_data(resolution)
+        
+        # Convert to PICT format: [1, channels, y, x]
+        if self.args.dims == 3:
+            # For 3D, we need to add a z-component (set to zero for now)
+            w_t0 = np.zeros_like(u_t0)
+            velocity = np.stack([u_t0, v_t0, w_t0], axis=0)  # [3, y, x]
+            velocity = velocity[np.newaxis, :]  # [1, 3, y, x]
+        else:
+            # For 2D
+            velocity = np.stack([u_t0, v_t0], axis=0)  # [2, y, x]
+            velocity = velocity[np.newaxis, :]  # [1, 2, y, x]
+        
+        # Convert to torch tensor
+        velocity_tensor = torch.from_numpy(velocity).to(dtype=self.dtype, device=cuda_device)
+        
+        # Log statistics
+        max_vel = torch.max(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
+        mean_vel = torch.mean(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
+        self.logger.info(f"Loaded warmup velocity statistics - Max: {max_vel:.3f}, Mean: {mean_vel:.3f}")
+        
+        # Verify divergence if 2D
+        if self.args.dims == 2:
+            div_rms = self._verify_divergence_free(velocity_tensor, resolution)
+            self.logger.info(f"Loaded warmup velocity field RMS divergence: {div_rms:.2e}")
+        
+        return velocity_tensor, training_timestep
+
+    def load_reference_training_data(self, resolution):
+        """Load reference training data for comparison"""
+        training_data_dir = Path(self.args.training_data_dir)
+        data_file = training_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
+        
+        if not data_file.exists():
+            self.logger.warning(f"Reference training data file not found: {data_file}")
+            return None, None
+            
+        self.logger.info(f"Loading reference training data: {data_file}")
+        
+        data = np.load(data_file)
+        u_data = data['u']  # Shape: [time, y, x]
+        v_data = data['v']  # Shape: [time, y, x]
+        
+        # Extract timestep information
+        reference_timestep = None
+        if 'delta_t' in data.keys():
+            reference_timestep = float(data['delta_t'])
+        elif 'time_array' in data.keys():
+            time_array = data['time_array']
+            if len(time_array) > 1:
+                reference_timestep = float(time_array[1] - time_array[0])
+        
+        self.logger.info(f"Reference data shape: u={u_data.shape}, v={v_data.shape}")
+        if reference_timestep:
+            self.logger.info(f"Reference timestep: {reference_timestep}")
+            
+        return (u_data, v_data), reference_timestep
+
     def load_initial_velocity_from_training_data(self, resolution):
         """Load initial velocity field from existing training data"""
         # Construct path to training data file
@@ -270,6 +449,132 @@ class TurbulenceDataGenerator:
         
         return div_rms
     
+    def compare_with_reference(self, pict_velocity, reference_data, step, resolution, save_dir):
+        """Compare PICT velocity with reference data and create visualizations"""
+        if reference_data is None:
+            return
+            
+        u_ref, v_ref = reference_data
+        
+        # Convert PICT velocity from torch to numpy
+        if isinstance(pict_velocity, torch.Tensor):
+            pict_velocity = pict_velocity.detach().cpu().numpy()
+        
+        # Extract PICT velocity components [1, 2, y, x] -> [y, x]
+        u_pict = pict_velocity[0, 0, :, :]
+        v_pict = pict_velocity[0, 1, :, :]
+        
+        # Extract reference velocity for this step [time, y, x] -> [y, x]
+        if step < u_ref.shape[0]:
+            u_ref_step = u_ref[step, :, :]
+            v_ref_step = v_ref[step, :, :]
+        else:
+            self.logger.warning(f"Step {step} exceeds reference data length {u_ref.shape[0]}")
+            return
+        
+        # Ensure same shape
+        if u_pict.shape != u_ref_step.shape:
+            self.logger.warning(f"Shape mismatch: PICT {u_pict.shape} vs Reference {u_ref_step.shape}")
+            return
+        
+        # Calculate differences
+        u_diff = u_pict - u_ref_step
+        v_diff = v_pict - v_ref_step
+        velocity_magnitude_pict = np.sqrt(u_pict**2 + v_pict**2)
+        velocity_magnitude_ref = np.sqrt(u_ref_step**2 + v_ref_step**2)
+        magnitude_diff = velocity_magnitude_pict - velocity_magnitude_ref
+        
+        # Statistics
+        u_rmse = np.sqrt(np.mean(u_diff**2))
+        v_rmse = np.sqrt(np.mean(v_diff**2))
+        mag_rmse = np.sqrt(np.mean(magnitude_diff**2))
+        max_u_diff = np.max(np.abs(u_diff))
+        max_v_diff = np.max(np.abs(v_diff))
+        max_mag_diff = np.max(np.abs(magnitude_diff))
+        
+        self.logger.info(f"Step {step} comparison:")
+        self.logger.info(f"  U-velocity RMSE: {u_rmse:.6f}, Max diff: {max_u_diff:.6f}")
+        self.logger.info(f"  V-velocity RMSE: {v_rmse:.6f}, Max diff: {max_v_diff:.6f}")
+        self.logger.info(f"  Magnitude RMSE: {mag_rmse:.6f}, Max diff: {max_mag_diff:.6f}")
+        
+        # Create comparison plots
+        comparison_dir = Path(save_dir) / f"comparison_step_{step}"
+        comparison_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create subplots for comparison
+        fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+        fig.suptitle(f'PICT vs Reference Comparison - Step {step} (Resolution {resolution}x{resolution})', fontsize=16)
+        
+        # Row 1: U-velocity
+        im1 = axes[0,0].imshow(u_pict, cmap='RdBu_r', origin='lower')
+        axes[0,0].set_title('PICT U-velocity')
+        plt.colorbar(im1, ax=axes[0,0])
+        
+        im2 = axes[0,1].imshow(u_ref_step, cmap='RdBu_r', origin='lower')
+        axes[0,1].set_title('Reference U-velocity')
+        plt.colorbar(im2, ax=axes[0,1])
+        
+        # Use symmetric colorbar for differences
+        u_diff_max = np.max(np.abs(u_diff))
+        im3 = axes[0,2].imshow(u_diff, cmap='RdBu_r', origin='lower', 
+                               vmin=-u_diff_max, vmax=u_diff_max)
+        axes[0,2].set_title(f'U-velocity Difference (RMSE: {u_rmse:.4f})')
+        plt.colorbar(im3, ax=axes[0,2])
+        
+        # Row 2: V-velocity
+        im4 = axes[1,0].imshow(v_pict, cmap='RdBu_r', origin='lower')
+        axes[1,0].set_title('PICT V-velocity')
+        plt.colorbar(im4, ax=axes[1,0])
+        
+        im5 = axes[1,1].imshow(v_ref_step, cmap='RdBu_r', origin='lower')
+        axes[1,1].set_title('Reference V-velocity')
+        plt.colorbar(im5, ax=axes[1,1])
+        
+        v_diff_max = np.max(np.abs(v_diff))
+        im6 = axes[1,2].imshow(v_diff, cmap='RdBu_r', origin='lower',
+                               vmin=-v_diff_max, vmax=v_diff_max)
+        axes[1,2].set_title(f'V-velocity Difference (RMSE: {v_rmse:.4f})')
+        plt.colorbar(im6, ax=axes[1,2])
+        
+        # Row 3: Velocity magnitude
+        im7 = axes[2,0].imshow(velocity_magnitude_pict, cmap='viridis', origin='lower')
+        axes[2,0].set_title('PICT Velocity Magnitude')
+        plt.colorbar(im7, ax=axes[2,0])
+        
+        im8 = axes[2,1].imshow(velocity_magnitude_ref, cmap='viridis', origin='lower')
+        axes[2,1].set_title('Reference Velocity Magnitude')
+        plt.colorbar(im8, ax=axes[2,1])
+        
+        mag_diff_max = np.max(np.abs(magnitude_diff))
+        im9 = axes[2,2].imshow(magnitude_diff, cmap='RdBu_r', origin='lower',
+                               vmin=-mag_diff_max, vmax=mag_diff_max)
+        axes[2,2].set_title(f'Magnitude Difference (RMSE: {mag_rmse:.4f})')
+        plt.colorbar(im9, ax=axes[2,2])
+        
+        # Save comparison plot
+        comparison_file = comparison_dir / f"velocity_comparison_step_{step}.png"
+        plt.tight_layout()
+        plt.savefig(comparison_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Save comparison statistics
+        stats_file = comparison_dir / f"comparison_stats_step_{step}.txt"
+        with open(stats_file, 'w') as f:
+            f.write(f"PICT vs Reference Comparison - Step {step}\n")
+            f.write(f"Resolution: {resolution}x{resolution}\n")
+            f.write(f"U-velocity RMSE: {u_rmse:.6f}\n")
+            f.write(f"V-velocity RMSE: {v_rmse:.6f}\n")
+            f.write(f"Magnitude RMSE: {mag_rmse:.6f}\n")
+            f.write(f"Max U difference: {max_u_diff:.6f}\n")
+            f.write(f"Max V difference: {max_v_diff:.6f}\n")
+            f.write(f"Max magnitude difference: {max_mag_diff:.6f}\n")
+        
+        self.logger.info(f"Saved comparison visualization: {comparison_file}")
+        return {
+            'u_rmse': u_rmse, 'v_rmse': v_rmse, 'mag_rmse': mag_rmse,
+            'max_u_diff': max_u_diff, 'max_v_diff': max_v_diff, 'max_mag_diff': max_mag_diff
+        }
+    
     def generate_initial_turbulence(self, domain, block):
         """Generate initial turbulent velocity field with proper divergence-free constraint"""
         dims = domain.getSpatialDims()
@@ -313,8 +618,89 @@ class TurbulenceDataGenerator:
         
         return velocity
     
+    def run_simulation_with_comparison(self, domain, resolution, steps, save_interval, training_timestep=None):
+        """Run simulation with step-by-step comparison to reference data"""
+        if training_timestep is not None:
+            time_step = training_timestep
+            self.logger.info(f"Using training data timestep: {time_step}")
+        else:
+            time_step = self.get_time_step(resolution)
+            self.logger.info(f"Using computed timestep: {time_step}")
+        
+        self.logger.info(f"Running simulation with comparison at {resolution}^{domain.getSpatialDims()} resolution for {steps} steps")
+        
+        # Load reference data for comparison
+        reference_data, ref_timestep = self.load_reference_training_data(resolution)
+        if reference_data is not None:
+            self.logger.info("Loaded reference data for comparison")
+        else:
+            self.logger.warning("No reference data available for comparison")
+        
+        # Create log directory for main simulation
+        log_dir = Path(self.args.save_dir) / f"simulation_logs_{resolution}"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create simulation
+        sim = PISOtorch_simulation.Simulation(
+            domain=domain,
+            time_step=time_step,
+            substeps="ADAPTIVE" if getattr(self.args, 'adaptive_timestep', False) else 1,
+            corrector_steps=2,
+            non_orthogonal=False,
+            pressure_tol=1e-6,
+            velocity_corrector="FD",
+            adaptive_CFL=getattr(self.args, 'adaptive_cfl', 0.8),
+            visualize_max_steps=getattr(self.args, 'visualize_max_steps', None),
+            log_interval=save_interval,
+            log_dir=str(log_dir),
+            stop_fn=lambda: False
+        )
+        
+        # Storage for trajectory data and comparison results
+        trajectory_data = []
+        comparison_stats = []
+        
+        # Initial comparison (step 0)
+        initial_velocity = domain.getBlock(0).velocity
+        trajectory_data.append(initial_velocity.detach().cpu().numpy().copy())
+        
+        if reference_data is not None:
+            stats = self.compare_with_reference(
+                initial_velocity, reference_data, 0, resolution, self.args.save_dir
+            )
+            if stats:
+                comparison_stats.append(stats)
+        
+        # Run simulation and collect data with step-by-step comparison
+        for step in range(1, steps + 1):
+            sim.run(iterations=save_interval)
+            
+            # Get current velocity field
+            current_velocity = domain.getBlock(0).velocity
+            trajectory_data.append(current_velocity.detach().cpu().numpy().copy())
+            
+            # Compare with reference data
+            if reference_data is not None:
+                stats = self.compare_with_reference(
+                    current_velocity, reference_data, step, resolution, self.args.save_dir
+                )
+                if stats:
+                    comparison_stats.append(stats)
+            
+            self.logger.info(f"Completed step {step}/{steps} at resolution {resolution}")
+        
+        # Save comparison summary
+        if comparison_stats:
+            self.save_comparison_summary(comparison_stats, resolution)
+        
+        return np.array(trajectory_data)
+    
     def run_simulation(self, domain, resolution, steps, save_interval, training_timestep=None):
         """Run simulation and collect velocity trajectory data"""
+        # Check if comparison mode is enabled
+        if getattr(self.args, 'enable_comparison', False):
+            return self.run_simulation_with_comparison(domain, resolution, steps, save_interval, training_timestep)
+        
         if training_timestep is not None:
             time_step = training_timestep
             self.logger.info(f"Using training data timestep: {time_step}")
@@ -361,6 +747,85 @@ class TurbulenceDataGenerator:
                 self.logger.info(f"Completed {step}/{steps} steps at resolution {resolution}")
         
         return np.array(trajectory_data)
+    
+    def save_comparison_summary(self, comparison_stats, resolution):
+        """Save a summary of all comparison statistics"""
+        summary_dir = Path(self.args.save_dir) / "comparison_summary"
+        summary_dir.mkdir(parents=True, exist_ok=True)
+        
+        summary_file = summary_dir / f"comparison_summary_{resolution}x{resolution}.txt"
+        
+        with open(summary_file, 'w') as f:
+            f.write(f"PICT vs Reference Comparison Summary\n")
+            f.write(f"Resolution: {resolution}x{resolution}\n")
+            f.write(f"Number of steps: {len(comparison_stats)}\n")
+            f.write("="*50 + "\n\n")
+            
+            for i, stats in enumerate(comparison_stats):
+                f.write(f"Step {i}:\n")
+                f.write(f"  U-velocity RMSE: {stats['u_rmse']:.6f}\n")
+                f.write(f"  V-velocity RMSE: {stats['v_rmse']:.6f}\n")
+                f.write(f"  Magnitude RMSE: {stats['mag_rmse']:.6f}\n")
+                f.write(f"  Max U difference: {stats['max_u_diff']:.6f}\n")
+                f.write(f"  Max V difference: {stats['max_v_diff']:.6f}\n")
+                f.write(f"  Max magnitude difference: {stats['max_mag_diff']:.6f}\n")
+                f.write("\n")
+        
+        # Create summary plot showing evolution of differences
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        fig.suptitle(f'PICT vs Reference Error Evolution - Resolution {resolution}x{resolution}', fontsize=16)
+        
+        steps = list(range(len(comparison_stats)))
+        u_rmse = [stats['u_rmse'] for stats in comparison_stats]
+        v_rmse = [stats['v_rmse'] for stats in comparison_stats]
+        mag_rmse = [stats['mag_rmse'] for stats in comparison_stats]
+        max_u_diff = [stats['max_u_diff'] for stats in comparison_stats]
+        max_v_diff = [stats['max_v_diff'] for stats in comparison_stats]
+        max_mag_diff = [stats['max_mag_diff'] for stats in comparison_stats]
+        
+        axes[0,0].plot(steps, u_rmse, 'b-o')
+        axes[0,0].set_title('U-velocity RMSE')
+        axes[0,0].set_xlabel('Step')
+        axes[0,0].set_ylabel('RMSE')
+        axes[0,0].grid(True)
+        
+        axes[0,1].plot(steps, v_rmse, 'r-o')
+        axes[0,1].set_title('V-velocity RMSE')
+        axes[0,1].set_xlabel('Step')
+        axes[0,1].set_ylabel('RMSE')
+        axes[0,1].grid(True)
+        
+        axes[0,2].plot(steps, mag_rmse, 'g-o')
+        axes[0,2].set_title('Velocity Magnitude RMSE')
+        axes[0,2].set_xlabel('Step')
+        axes[0,2].set_ylabel('RMSE')
+        axes[0,2].grid(True)
+        
+        axes[1,0].plot(steps, max_u_diff, 'b-s')
+        axes[1,0].set_title('Max U-velocity Difference')
+        axes[1,0].set_xlabel('Step')
+        axes[1,0].set_ylabel('Max Diff')
+        axes[1,0].grid(True)
+        
+        axes[1,1].plot(steps, max_v_diff, 'r-s')
+        axes[1,1].set_title('Max V-velocity Difference')
+        axes[1,1].set_xlabel('Step')
+        axes[1,1].set_ylabel('Max Diff')
+        axes[1,1].grid(True)
+        
+        axes[1,2].plot(steps, max_mag_diff, 'g-s')
+        axes[1,2].set_title('Max Magnitude Difference')
+        axes[1,2].set_xlabel('Step')
+        axes[1,2].set_ylabel('Max Diff')
+        axes[1,2].grid(True)
+        
+        plt.tight_layout()
+        summary_plot_file = summary_dir / f"error_evolution_{resolution}x{resolution}.png"
+        plt.savefig(summary_plot_file, dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        self.logger.info(f"Saved comparison summary: {summary_file}")
+        self.logger.info(f"Saved error evolution plot: {summary_plot_file}")
     
     def warmup_simulation(self, domain, resolution):
         """Run warmup simulation to reach statistically steady state"""
@@ -414,10 +879,14 @@ class TurbulenceDataGenerator:
         """Main data generation pipeline"""
         self.logger.info("Starting turbulence data generation with PICT")
         
-        # Check if we should use training data for initialization
+        # Check if we should use warmup data or training data for initialization
+        use_warmup_data_init = getattr(self.args, 'use_warmup_data_init', False)
         use_training_data_init = getattr(self.args, 'use_training_data_init', False)
         
-        if use_training_data_init:
+        # Warmup data takes priority over training data
+        if use_warmup_data_init:
+            self.logger.info("Using warmup data for initialization (still doing 4s warmup as requested)")
+        elif use_training_data_init:
             self.logger.info("Using training data for initialization (skipping warmup)")
         else:
             self.logger.info("Using generated initial conditions with warmup")
@@ -426,7 +895,31 @@ class TurbulenceDataGenerator:
         hr_domain, hr_block = self.create_domain(self.args.high_res)
         hr_training_timestep = None
         
-        if use_training_data_init:
+        if use_warmup_data_init:
+            # Try to load initial velocity from warmup data
+            initial_velocity, hr_training_timestep = self.load_initial_velocity_from_warmup_data(self.args.high_res)
+            
+            if initial_velocity is not None:
+                # Set the loaded velocity field
+                hr_block.setVelocity(initial_velocity)
+                hr_domain.PrepareSolve()
+                hr_domain.UpdateDomainData()
+                self.logger.info("Successfully initialized from warmup data")
+                if hr_training_timestep is not None:
+                    self.logger.info(f"Will use warmup data timestep: {hr_training_timestep}")
+                
+                # Always run 4s warmup when using warmup data as requested
+                self.logger.info("Running 4s warmup as requested for warmup data initialization")
+                self.warmup_simulation(hr_domain, self.args.high_res)
+            else:
+                # Fallback to generated initial conditions
+                self.logger.info("Falling back to generated initial conditions")
+                initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
+                hr_domain.PrepareSolve()
+                
+                # Run warmup since we're using generated conditions
+                self.warmup_simulation(hr_domain, self.args.high_res)
+        elif use_training_data_init:
             # Try to load initial velocity from training data
             initial_velocity, hr_training_timestep = self.load_initial_velocity_from_training_data(self.args.high_res)
             
@@ -472,7 +965,30 @@ class TurbulenceDataGenerator:
             else:
                 domain, block = self.create_domain(resolution)
                 
-                if use_training_data_init:
+                if use_warmup_data_init:
+                    # Try to load velocity for this resolution from warmup data
+                    target_velocity, current_training_timestep = self.load_initial_velocity_from_warmup_data(resolution)
+                    
+                    if target_velocity is not None:
+                        # Use loaded velocity for this resolution
+                        self.logger.info(f"Using loaded warmup velocity for resolution {resolution}")
+                        block.setVelocity(target_velocity)
+                        domain.PrepareSolve()
+                        domain.UpdateDomainData()
+                        if current_training_timestep is not None:
+                            self.logger.info(f"Using warmup timestep {current_training_timestep} for resolution {resolution}")
+                    else:
+                        # Fallback to downsampling from high-res
+                        hr_velocity = hr_domain.getBlock(0).velocity
+                        downsampled_velocity = self.downsample_velocity(
+                            hr_velocity, resolution, self.args.high_res
+                        )
+                        block.setVelocity(downsampled_velocity)
+                        domain.PrepareSolve()
+                        domain.UpdateDomainData()
+                        # Use high-res timestep if available, otherwise computed
+                        current_training_timestep = hr_training_timestep
+                elif use_training_data_init:
                     # Try to load velocity for this resolution
                     target_velocity, current_training_timestep = self.load_initial_velocity_from_training_data(resolution)
                     
@@ -502,16 +1018,8 @@ class TurbulenceDataGenerator:
                         hr_velocity, resolution, self.args.high_res
                     )
                     block.setVelocity(downsampled_velocity)
-
-                    domain.PrepareSolve() # 会分配/构建稀疏结构、缓冲区，并在内部调用一次 GPU 指针同步（SetupDomainGPU）。调用完后域已初始化且指针已对齐。
-                    domain.UpdateDomainData() # 只能在域已初始化后调用；它用来在你“改变了张量内容”（如 setVelocity / setVelocitySource / 设置 result 向量）之后刷新 GPU 侧指针/元数据。
-                    # 第一次/拓扑或边界结构变化后：
-                    # 先做所有结构与初值设置（如 block.setVelocity(...)）
-                    # 调用 domain.PrepareSolve()（完成初始化与一次同步）
-                    # 之后若又修改了任何张量，再调用 domain.UpdateDomainData()
-                    # 已初始化的域、仅改动场数据时：
-                    # 直接改（如 block.setVelocity(...)）
-                    # 然后 domain.UpdateDomainData()；不需要再 PrepareSolve()
+                    domain.PrepareSolve()
+                    domain.UpdateDomainData()
             
             trajectory = self.run_simulation(
                 domain, resolution, self.args.generate_steps, 
@@ -599,28 +1107,66 @@ def main():
     """
     Main function for PICT turbulence data generation.
     
-    NEW FEATURE: The code now automatically extracts and uses timestep information 
-    from training data when --use_training_data_init is enabled. This ensures 
-    that PICT simulations use the same temporal resolution as the training data.
+    NEW FEATURES: 
+    1. The code now automatically extracts and uses timestep information 
+       from training data when --use_training_data_init is enabled. This ensures 
+       that PICT simulations use the same temporal resolution as the training data.
+    2. Support for warmup data initialization with --use_warmup_data_init flag.
+       This allows loading initial conditions from warmup_data directory.
     
     Usage examples:
     
-    1. Generate data using training data for initialization and timestep (NEW):
+    1. Generate data using warmup segment data for initialization (NEW):
+    python generate_turbulence_data_pict.py --use_warmup_data_init --warmup_segment 6 --training_data_dir "./training_data" --generate_steps 12200 --save_file "pict_from_warmup"
+    
+    2. Use different warmup segments (1-6 available, where 6 is post-warmup state):
+    python generate_turbulence_data_pict.py --use_warmup_data_init --warmup_segment 1 --generate_steps 12200 --save_file "pict_from_warmup_early"
+    
+    3. Generate data using training data for initialization and timestep:
     python generate_turbulence_data_pict.py --use_training_data_init --training_data_dir "./training_data" --generate_steps 5000 --save_file "pict_from_training"
     
-    2. Generate training data with original method:
+    4. Generate training data with original method:
     python generate_turbulence_data_pict.py --generate_steps 5000 --high_res 512 --save_file "turbulence_training"
     
-    3. Quick test with training data initialization and timestep:
-    python generate_turbulence_data_pict.py --use_training_data_init --generate_steps 100 --high_res 256 --low_res 64
+    5. Quick test with warmup data initialization:
+    python generate_turbulence_data_pict.py --use_warmup_data_init --warmup_segment 6 --generate_steps 100 --high_res 256 --low_res 64
     
-    4. Use custom training data directory:
-    python generate_turbulence_data_pict.py --use_training_data_init --training_data_dir "/path/to/your/training_data" --generate_steps 1000
+    6. Use custom training data directory:
+    python generate_turbulence_data_pict.py --use_warmup_data_init --warmup_segment 6 --training_data_dir "/path/to/your/training_data" --generate_steps 12200
+    
+    7. Enable step-by-step comparison with reference data (NEW):
+    python generate_turbulence_data_pict.py --use_warmup_data_init --warmup_segment 1 --enable_comparison --generate_steps 5 --save_file "pict_comparison"
+    
+    Warmup data features:
+    - Loads initial velocity from warmup_data subdirectory
+    - Supports warmup segment files (decaying_turbulence_v2_warmup_segment_X_step_Y_index_1.npz)
+    - Default uses segment 6 (step 300) representing post-warmup state
+    - Automatically resamples data to match target resolution if needed
+    - Always performs 4s warmup as requested for proper comparison
+    - Uses same timestep extraction logic as training data
+    - Maintains consistency with reference simulation temporal resolution
+    
+    Available warmup segments:
+    - Segment 1 (step 50): Early warmup state
+    - Segment 2 (step 100): Mid-early warmup
+    - Segment 3 (step 150): Mid warmup
+    - Segment 4 (step 200): Mid-late warmup
+    - Segment 5 (step 250): Late warmup
+    - Segment 6 (step 300): Post-warmup state (recommended for comparison)
+    
+    Comparison and visualization features:
+    - Enable with --enable_comparison flag
+    - Loads reference training data for step-by-step comparison
+    - Creates detailed comparison plots for each simulation step
+    - Generates difference fields (PICT - Reference) with statistics
+    - Produces error evolution plots showing RMSE and max differences over time
+    - Saves comparison statistics for quantitative analysis
+    - Outputs include U-velocity, V-velocity, and magnitude comparisons
     
     Training data timestep extraction:
-    - Looks for 'timestep' field in training data files
-    - Falls back to calculating from 'time' array if available
-    - Uses computed timestep if training data timestep cannot be extracted
+    - Looks for 'delta_t' field in data files
+    - Falls back to calculating from 'time_array' if available
+    - Uses computed timestep if data timestep cannot be extracted
     - Saves timestep information in generated data files for consistency
     """
     parser = argparse.ArgumentParser(description='Generate turbulence training data using PICT')
@@ -629,10 +1175,10 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--dims', type=int, default=2, choices=[2, 3], 
                        help='Spatial dimensions (2D or 3D)')
-    parser.add_argument('--generate_steps', type=int, default=3)
+    parser.add_argument('--generate_steps', type=int, default=12200)
     parser.add_argument('--save_interval', type=int, default=1,
                        help='Save data every N simulation steps')
-    parser.add_argument('--warmup_time', type=float, default=0.0)
+    parser.add_argument('--warmup_time', type=float, default=4.0)
     
     # Physical parameters
     parser.add_argument('--max_velocity', type=float, default=4.2)
@@ -646,15 +1192,15 @@ def main():
     # Adaptive timestep (CFL-based)
     parser.add_argument('--adaptive_timestep', action='store_true', default=False,
                        help='Enable adaptive timestep based on CFL condition')
-    parser.add_argument('--adaptive_cfl', type=float, default=0.5,
+    parser.add_argument('--adaptive_cfl', type=float, default=0.8,
                        help='Target CFL number for adaptive timestep')
     parser.add_argument('--visualize_max_steps', type=int, default=5,
                        help='Only visualize the first N steps (set None to disable limit)')
     
     # Resolution parameters
-    parser.add_argument('--low_res', type=int, default=2048)
+    parser.add_argument('--low_res', type=int, default=64)
 
-    parser.add_argument('--high_res', type=int, default=2048,  # Reduced from 2048 for PICT
+    parser.add_argument('--high_res', type=int, default=128,  # Reduced from 2048 for PICT
                        help='Highest resolution (limited by GPU memory)')
     
     # Output parameters
@@ -665,6 +1211,12 @@ def main():
     # Training data initialization
     parser.add_argument('--use_training_data_init', action='store_true', default=True,
                        help='Use training data t=0 velocity for initialization (skips warmup)')
+    parser.add_argument('--use_warmup_data_init', action='store_true', default=False,
+                       help='Use warmup data t=0 velocity for initialization (overrides use_training_data_init)')
+    parser.add_argument('--warmup_segment', type=int, default=1,
+                       help='Which warmup segment to use for initialization (1-6, default=6 for post-warmup state)')
+    parser.add_argument('--enable_comparison', action='store_true', default=False,
+                       help='Enable step-by-step comparison with reference training data and visualization')
     parser.add_argument('--training_data_dir', type=str, default='./training_data',
                        help='Directory containing training data files')
     
