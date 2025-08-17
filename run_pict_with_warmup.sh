@@ -11,7 +11,7 @@ python generate_turbulence_data_pict.py \
     --use_warmup_data_init \
     --warmup_segment 1 \
     --enable_comparison \
-    --training_data_dir "./training_data" \
+    --training_data_dir "./training_data/warmup_data" \
     --high_res 128 \
     --low_res 64 \
     --save_interval 1 \

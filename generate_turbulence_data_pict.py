@@ -156,7 +156,7 @@ class TurbulenceDataGenerator:
     
     def load_initial_velocity_from_warmup_data(self, resolution):
         """Load initial velocity field from warmup segment data"""
-        warmup_data_dir = Path(self.args.training_data_dir) / "warmup_data"
+        warmup_data_dir = Path(self.args.training_data_dir)
         
         # First try to load from warmup segment files (post-warmup data)
         # Use the last segment as it represents the state after warmup completion
@@ -918,42 +918,37 @@ class TurbulenceDataGenerator:
                 
                 # Always run 4s warmup when using warmup data as requested
                 self.logger.info("Running 4s warmup as requested for warmup data initialization")
-                self.warmup_simulation(hr_domain, self.args.high_res, hr_training_timestep)
             else:
                 # Fallback to generated initial conditions
                 self.logger.info("Falling back to generated initial conditions")
                 initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
                 hr_domain.PrepareSolve()
                 
-                # Run warmup since we're using generated conditions
-                self.warmup_simulation(hr_domain, self.args.high_res)
-        elif use_training_data_init:
+        if use_training_data_init:
             # Try to load initial velocity from training data
-            initial_velocity, hr_training_timestep = self.load_initial_velocity_from_training_data(self.args.high_res)
+            initial_velocity_training, hr_training_timestep = self.load_initial_velocity_from_training_data(self.args.high_res)
             
-            if initial_velocity is not None:
+            if initial_velocity is None:
                 # Set the loaded velocity field
+                initial_velocity = initial_velocity_training
                 hr_block.setVelocity(initial_velocity)
                 hr_domain.PrepareSolve()
                 hr_domain.UpdateDomainData()
                 self.logger.info("Successfully initialized from training data")
                 if hr_training_timestep is not None:
                     self.logger.info(f"Will use training data timestep: {hr_training_timestep}")
-            else:
+            elif initial_velocity_training is None:
                 # Fallback to generated initial conditions
                 self.logger.info("Falling back to generated initial conditions")
                 initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
                 hr_domain.PrepareSolve()
                 
-                # Run warmup since we're using generated conditions
-                self.warmup_simulation(hr_domain, self.args.high_res)
         else:
             # Original approach: generate initial turbulent field
             initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
             hr_domain.PrepareSolve()
             
-            # Run warmup at high resolution
-            self.warmup_simulation(hr_domain, self.args.high_res)
+        self.warmup_simulation(hr_domain, self.args.high_res, hr_training_timestep)
         
         # Get resolutions to generate
         resolution_list = []
@@ -1225,7 +1220,7 @@ def main():
                        help='Which warmup segment to use for initialization (1-6, default=6 for post-warmup state)')
     parser.add_argument('--enable_comparison', action='store_true', default=False,
                        help='Enable step-by-step comparison with reference training data and visualization')
-    parser.add_argument('--training_data_dir', type=str, default='./training_data',
+    parser.add_argument('--training_data_dir', type=str, default='./training_data/warmup_data',
                        help='Directory containing training data files')
     
     args = parser.parse_args()
