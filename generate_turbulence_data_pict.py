@@ -624,8 +624,9 @@ class TurbulenceDataGenerator:
             time_step = training_timestep
             self.logger.info(f"Using training data timestep: {time_step}")
         else:
-            time_step = self.get_time_step(resolution)
-            self.logger.info(f"Using computed timestep: {time_step}")
+            # Use PICT native adaptive timestep - let PICT calculate it automatically
+            time_step = self.args.save_interval * 0.001  # Small base timestep for output intervals
+            self.logger.info(f"Using PICT native adaptive timestep with output interval: {time_step}")
         
         self.logger.info(f"Running simulation with comparison at {resolution}^{domain.getSpatialDims()} resolution for {steps} steps")
         
@@ -640,11 +641,11 @@ class TurbulenceDataGenerator:
         log_dir = Path(self.args.save_dir) / f"simulation_logs_{resolution}"
         log_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create simulation
+        # Create simulation - always use PICT native adaptive timestep
         sim = PISOtorch_simulation.Simulation(
             domain=domain,
             time_step=time_step,
-            substeps="ADAPTIVE" if getattr(self.args, 'adaptive_timestep', False) else 1,
+            substeps="ADAPTIVE",  # Always use PICT native adaptive timestep
             corrector_steps=2,
             non_orthogonal=False,
             pressure_tol=1e-6,
@@ -705,8 +706,9 @@ class TurbulenceDataGenerator:
             time_step = training_timestep
             self.logger.info(f"Using training data timestep: {time_step}")
         else:
-            time_step = self.get_time_step(resolution)
-            self.logger.info(f"Using computed timestep: {time_step}")
+            # Use PICT native adaptive timestep - let PICT calculate it automatically
+            time_step = self.args.save_interval * 0.001  # Small base timestep for output intervals
+            self.logger.info(f"Using PICT native adaptive timestep with output interval: {time_step}")
         
         self.logger.info(f"Running simulation at {resolution}^{domain.getSpatialDims()} resolution for {steps} steps")
         
@@ -714,11 +716,11 @@ class TurbulenceDataGenerator:
         log_dir = Path(self.args.save_dir) / f"simulation_logs_{resolution}"
         log_dir.mkdir(parents=True, exist_ok=True)
         
-        # Create simulation
+        # Create simulation - always use PICT native adaptive timestep
         sim = PISOtorch_simulation.Simulation(
             domain=domain,
             time_step=time_step,
-            substeps="ADAPTIVE" if getattr(self.args, 'adaptive_timestep', False) else 1,
+            substeps="ADAPTIVE",  # Always use PICT native adaptive timestep
             corrector_steps=2,
             non_orthogonal=False,
             pressure_tol=1e-6,
@@ -827,13 +829,22 @@ class TurbulenceDataGenerator:
         self.logger.info(f"Saved comparison summary: {summary_file}")
         self.logger.info(f"Saved error evolution plot: {summary_plot_file}")
     
-    def warmup_simulation(self, domain, resolution):
+    def warmup_simulation(self, domain, resolution, training_timestep=None):
         """Run warmup simulation to reach statistically steady state"""
         warmup_time = self.args.warmup_time
-        time_step = self.get_time_step(resolution)
-        warmup_steps = int(warmup_time / time_step)
         
-        self.logger.info(f"Running warmup for {warmup_steps} steps at resolution {resolution}")
+        # Use training timestep if available, otherwise use small default timestep
+        if training_timestep is not None:
+            output_time_step = training_timestep
+            self.logger.info(f"Using training data timestep for warmup: {training_timestep}")
+        else:
+            # Use PICT native adaptive timestep - calculate warmup steps based on output interval
+            output_time_step = 0.001  # Small base timestep for output intervals
+            self.logger.info(f"Using default output timestep for warmup: {output_time_step}")
+            
+        warmup_steps = round(warmup_time / output_time_step)
+        
+        self.logger.info(f"Running warmup for {warmup_steps} output steps (total time: {warmup_time}s) at resolution {resolution}")
         
         # Create log directory for warmup simulation
         log_dir = Path(self.args.save_dir) / "warmup_logs"
@@ -841,8 +852,8 @@ class TurbulenceDataGenerator:
         
         sim = PISOtorch_simulation.Simulation(
             domain=domain,
-            time_step=time_step,
-            substeps="ADAPTIVE" if getattr(self.args, 'adaptive_timestep', False) else 1,
+            time_step=output_time_step,
+            substeps="ADAPTIVE",  # Always use PICT native adaptive timestep
             corrector_steps=2,
             non_orthogonal=False,
             pressure_tol=1e-6,
@@ -857,10 +868,7 @@ class TurbulenceDataGenerator:
         sim.run(iterations=warmup_steps)
         self.logger.info(f"Warmup completed at resolution {resolution}")
     
-    def get_time_step(self, resolution):
-        """Calculate stable time step for given resolution"""
-        dx = (2 * np.pi * self.args.domain_scale) / resolution
-        return self.args.cfl_safety_factor * dx / self.args.max_velocity
+
     
     def downsample_velocity(self, velocity_hr, target_resolution, source_resolution):
         """Downsample high-resolution velocity to target resolution"""
@@ -910,7 +918,7 @@ class TurbulenceDataGenerator:
                 
                 # Always run 4s warmup when using warmup data as requested
                 self.logger.info("Running 4s warmup as requested for warmup data initialization")
-                self.warmup_simulation(hr_domain, self.args.high_res)
+                self.warmup_simulation(hr_domain, self.args.high_res, hr_training_timestep)
             else:
                 # Fallback to generated initial conditions
                 self.logger.info("Falling back to generated initial conditions")
@@ -1211,7 +1219,7 @@ def main():
     # Training data initialization
     parser.add_argument('--use_training_data_init', action='store_true', default=True,
                        help='Use training data t=0 velocity for initialization (skips warmup)')
-    parser.add_argument('--use_warmup_data_init', action='store_true', default=False,
+    parser.add_argument('--use_warmup_data_init', action='store_true', default=True,
                        help='Use warmup data t=0 velocity for initialization (overrides use_training_data_init)')
     parser.add_argument('--warmup_segment', type=int, default=1,
                        help='Which warmup segment to use for initialization (1-6, default=6 for post-warmup state)')
