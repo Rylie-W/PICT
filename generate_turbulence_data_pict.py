@@ -70,7 +70,7 @@ class TurbulenceDataGenerator:
         return domain, block
     
     def _generate_divergence_free_field(self, shape, peak_wavenumber):
-        """Generate divergence-free velocity field using proper spectral method"""
+        """Generate divergence-free velocity field using proper spectral method with improved von Karman spectrum"""
         # Create wavenumber grids
         if len(shape) == 5:  # 3D
             nz, ny, nx = shape[2], shape[3], shape[4]
@@ -79,6 +79,9 @@ class TurbulenceDataGenerator:
             kx = torch.fft.fftfreq(nx, device=cuda_device)
             KZ, KY, KX = torch.meshgrid(kz, ky, kx, indexing='ij')
             k_mag = torch.sqrt(KX**2 + KY**2 + KZ**2)
+            
+            # Domain size and length scale parameters
+            domain_size = max(nz, ny, nx)
             
             # Create random potential in Fourier space
             potential_fft = torch.complex(
@@ -93,24 +96,53 @@ class TurbulenceDataGenerator:
             KY, KX = torch.meshgrid(ky, kx, indexing='ij')
             k_mag = torch.sqrt(KX**2 + KY**2)
             
+            # Domain size and length scale parameters
+            domain_size = max(ny, nx)
+            
             # For 2D, use streamfunction to ensure divergence-free field
             streamfunction_fft = torch.complex(
                 torch.randn(ny, nx, device=cuda_device),
                 torch.randn(ny, nx, device=cuda_device)
             )
         
-        # Apply realistic turbulence spectrum (Kolmogorov-like)
-        # E(k) ~ k^(-5/3), so velocity ~ k^(-5/6)
-        k_scaled = k_mag / (peak_wavenumber / 4.0)  # Scale relative to peak
+        # Improved von Karman spectrum with configurable physical parameters
+        # Control integral length scale (size of largest eddies)
+        # Use parameters from args if available, otherwise use defaults
+        integral_scale_factor = getattr(self.args, 'integral_scale_factor', 6.0)  # domain_size / this factor
+        Re_lambda = getattr(self.args, 'taylor_reynolds', 50.0)  # Taylor microscale Reynolds number
         
-        # Von Karman-like spectrum with proper energy distribution
-        energy_spectrum = (k_scaled**4) / (1 + k_scaled**2)**(17/6)
+        L_integral = domain_size / integral_scale_factor  # Integral length scale (pixels)
+        k0 = 1.0 / L_integral  # Integral wavenumber
         
-        # Add exponential cutoff for high wavenumbers
-        energy_spectrum *= torch.exp(-(k_scaled / 2.0)**2)
+        # Control dissipation scale (size of smallest eddies)
+        eta_over_L = Re_lambda**(-3/4)  # Kolmogorov scale / integral scale
+        k_eta = 1.0 / (eta_over_L * L_integral)  # Dissipation wavenumber
         
-        # Remove DC component
+        # True von Karman spectrum for 3D isotropic turbulence
+        # E(k) = C * (k/k0)^4 / (1 + (k/k0)^2)^(17/6) * exp(-2*(k/k_eta)^2)
+        k_over_k0 = k_mag / k0
+        k_over_keta = k_mag / k_eta
+        
+        # Von Karman spectrum with realistic energy distribution
+        energy_spectrum = (k_over_k0**4) / (1 + k_over_k0**2)**(17/6)
+        
+        # Add exponential cutoff at dissipation scale (more physical than previous version)
+        energy_spectrum *= torch.exp(-2.0 * k_over_keta**2)
+        
+        # Normalize to ensure reasonable energy levels
+        # Peak of the spectrum should be at k ≈ k0
+        k_peak_theory = k0 * (4.0/13.0)**(1/2)  # Theoretical peak location
+        peak_mask = (k_mag >= k_peak_theory * 0.8) & (k_mag <= k_peak_theory * 1.2)
+        if torch.any(peak_mask):
+            energy_spectrum = energy_spectrum / torch.max(energy_spectrum[peak_mask])
+        
+        # Remove DC component (no mean flow)
         energy_spectrum[k_mag < 1e-10] = 0
+        
+        # Apply additional smoothing near k=0 to avoid numerical issues
+        k_smooth = k0 / 10.0
+        smooth_factor = torch.tanh(k_mag / k_smooth)
+        energy_spectrum *= smooth_factor
         
         # Apply spectrum to create realistic turbulence
         if len(shape) == 5:  # 3D
@@ -576,7 +608,7 @@ class TurbulenceDataGenerator:
         }
     
     def generate_initial_turbulence(self, domain, block):
-        """Generate initial turbulent velocity field with proper divergence-free constraint"""
+        """Generate initial turbulent velocity field with proper divergence-free constraint using improved von Karman spectrum"""
         dims = domain.getSpatialDims()
         block_size = block.getSizes()
         
@@ -585,13 +617,28 @@ class TurbulenceDataGenerator:
         
         self.logger.info(f"Generating divergence-free turbulent field for {resolution}^{dims} domain")
         
+        # Calculate and log physical parameters (must match _generate_divergence_free_field)
+        domain_size = resolution
+        integral_scale_factor = getattr(self.args, 'integral_scale_factor', 6.0)
+        Re_lambda = getattr(self.args, 'taylor_reynolds', 50.0)
+        
+        L_integral = domain_size / integral_scale_factor  # Integral length scale (pixels)
+        eta_over_L = Re_lambda**(-3/4)  # Kolmogorov scale / integral scale
+        L_kolmogorov = eta_over_L * L_integral  # Kolmogorov length scale
+        
+        self.logger.info(f"Physical parameters:")
+        self.logger.info(f"  - Integral length scale: {L_integral:.1f} grid points ({L_integral/resolution:.3f} domain size)")
+        self.logger.info(f"  - Taylor microscale Re: {Re_lambda:.1f}")
+        self.logger.info(f"  - Kolmogorov scale: {L_kolmogorov:.3f} grid points")
+        self.logger.info(f"  - Scale separation ratio: {L_integral/L_kolmogorov:.1f}")
+        
         # Generate random velocity field
         if dims == 3:
             shape = [1, dims, block_size.z, block_size.y, block_size.x]  # [1, 3, z, y, x]
         else:
             shape = [1, dims, block_size.y, block_size.x]  # [1, 2, y, x]
         
-        # Create divergence-free velocity field using vector potential method
+        # Create divergence-free velocity field using improved vector potential method
         velocity = self._generate_divergence_free_field(shape, self.args.peak_wavenumber)
         
         # Verify divergence-free property
@@ -599,19 +646,55 @@ class TurbulenceDataGenerator:
             div_rms = self._verify_divergence_free(velocity, resolution)
             self.logger.info(f"Initial velocity field RMS divergence: {div_rms:.2e}")
         
+        # Calculate energy spectrum for verification
+        if dims == 2:
+            u_data = velocity[0, 0, :, :].detach().cpu().numpy()
+            v_data = velocity[0, 1, :, :].detach().cpu().numpy()
+            
+            # Compute 2D FFT and energy spectrum
+            u_fft = np.fft.fft2(u_data)
+            v_fft = np.fft.fft2(v_data)
+            energy_2d = 0.5 * (np.abs(u_fft)**2 + np.abs(v_fft)**2)
+            
+            # Radially average to get 1D spectrum
+            kx = np.fft.fftfreq(resolution)
+            ky = np.fft.fftfreq(resolution)
+            KX, KY = np.meshgrid(kx, ky)
+            k_mag = np.sqrt(KX**2 + KY**2)
+            
+            # Find energy at key wavenumbers
+            k0 = 1.0 / L_integral
+            k_integral_idx = np.argmin(np.abs(k_mag - k0))
+            energy_at_k0 = energy_2d.flat[k_integral_idx]
+            
+            self.logger.info(f"Energy spectrum verification:")
+            self.logger.info(f"  - Energy at integral scale (k0={k0:.3f}): {energy_at_k0:.2e}")
+        
         # Scale to desired maximum velocity
         velocity_magnitude = torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))
         max_vel = torch.max(velocity_magnitude).item()
         mean_vel = torch.mean(velocity_magnitude).item()
         
-        self.logger.info(f"Velocity statistics before scaling - Max: {max_vel:.3f}, Mean: {mean_vel:.3f}")
+        # Calculate turbulent kinetic energy
+        tke = 0.5 * torch.mean(velocity_magnitude**2).item()
+        
+        self.logger.info(f"Velocity statistics before scaling:")
+        self.logger.info(f"  - Max velocity: {max_vel:.3f}")
+        self.logger.info(f"  - Mean velocity magnitude: {mean_vel:.3f}")
+        self.logger.info(f"  - Turbulent kinetic energy: {tke:.3f}")
         
         velocity = velocity * (self.args.max_velocity / max_vel)
         
         # Log final statistics
         final_max = torch.max(torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))).item()
         final_mean = torch.mean(torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))).item()
-        self.logger.info(f"Velocity statistics after scaling - Max: {final_max:.3f}, Mean: {final_mean:.3f}")
+        final_tke = 0.5 * torch.mean(velocity**2).item()
+        
+        self.logger.info(f"Final velocity statistics after scaling:")
+        self.logger.info(f"  - Max velocity: {final_max:.3f}")
+        self.logger.info(f"  - Mean velocity magnitude: {final_mean:.3f}")
+        self.logger.info(f"  - Turbulent kinetic energy: {final_tke:.3f}")
+        self.logger.info(f"  - Velocity scaling factor: {self.args.max_velocity / max_vel:.3f}")
         
         # Set velocity field
         block.setVelocity(velocity)
