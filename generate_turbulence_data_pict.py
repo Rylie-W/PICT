@@ -1173,7 +1173,11 @@ class TurbulenceDataGenerator:
             hr_domain.PrepareSolve()
             
         # Calculate warmup parameters
-        if hr_training_timestep is not None:
+        if hasattr(self.args, 'warmup_timestep') and self.args.warmup_timestep is not None:
+            # Use manually specified warmup timestep
+            output_time_step = self.args.warmup_timestep
+            self.logger.info(f"Using manually specified warmup timestep: {output_time_step:.2e}")
+        elif hr_training_timestep is not None:
             output_time_step = hr_training_timestep
             self.logger.info(f"Using training data timestep for warmup: {hr_training_timestep}")
         else:
@@ -1223,7 +1227,23 @@ class TurbulenceDataGenerator:
             else:
                 self.logger.info(f"Using warmup data timestep {current_training_timestep} for resolution {resolution}")
         
-        current_training_timestep = current_training_timestep if current_training_timestep is not None else hr_training_timestep
+        # Determine final training timestep with manual override priority
+        if hasattr(self.args, 'training_timestep') and self.args.training_timestep is not None:
+            # Use manually specified training timestep (highest priority)
+            final_training_timestep = self.args.training_timestep
+            self.logger.info(f"Using manually specified training timestep: {final_training_timestep:.2e}")
+        elif current_training_timestep is not None:
+            # Use timestep from training data or simulation data
+            final_training_timestep = current_training_timestep
+            self.logger.info(f"Using extracted training timestep: {final_training_timestep:.2e}")
+        elif hr_training_timestep is not None:
+            # Fallback to hr_training_timestep
+            final_training_timestep = hr_training_timestep
+            self.logger.info(f"Using hr_training_timestep: {final_training_timestep:.2e}")
+        else:
+            # Last resort: compute CFD timestep
+            final_training_timestep = self.compute_cfd_timestep(resolution)
+            self.logger.info(f"Using computed CFD timestep for training: {final_training_timestep:.2e}")
         
         # CRITICAL: Use the same simulator instance to preserve ALL pressure info
         self.logger.info(f"Using the same simulator instance to preserve complete pressure continuity")
@@ -1234,13 +1254,13 @@ class TurbulenceDataGenerator:
             save_interval=self.args.save_interval
         )
         
-        self.save_trajectory_data(trajectory, resolution, current_training_timestep)
+        self.save_trajectory_data(trajectory, resolution, final_training_timestep)
         
         # If user wants multiple resolutions, we need to downsample the trajectory data
         # This preserves pressure continuity while providing multiple resolution outputs
         if self.args.low_res < self.args.high_res:
             self.logger.info("Generating lower resolution data by downsampling trajectory")
-            self._generate_downsampled_resolutions(trajectory, current_training_timestep)
+            self._generate_downsampled_resolutions(trajectory, final_training_timestep)
     
     def _generate_downsampled_resolutions(self, trajectory, timestep):
         """Generate lower resolution data by downsampling the high-resolution trajectory"""
@@ -1458,6 +1478,15 @@ def main():
     7. Enable step-by-step comparison with reference data (NEW):
     python generate_turbulence_data_pict.py --use_warmup_data_init --warmup_segment 1 --enable_comparison --generate_steps 5 --save_file "pict_comparison"
     
+    8. Use manually specified timesteps (NEW):
+    python generate_turbulence_data_pict.py --warmup_timestep 1e-4 --training_timestep 2e-4 --generate_steps 5000 --save_file "manual_timestep"
+    
+    9. Override only warmup timestep (let system auto-calculate training timestep):
+    python generate_turbulence_data_pict.py --use_warmup_data_init --warmup_timestep 5e-5 --generate_steps 12200
+    
+    10. Override only training timestep (let system auto-calculate warmup timestep):
+    python generate_turbulence_data_pict.py --use_training_data_init --training_timestep 1e-4 --generate_steps 5000
+    
     Warmup data features:
     - Loads initial velocity from warmup_data subdirectory
     - Supports warmup segment files (decaying_turbulence_v2_warmup_segment_X_step_Y_index_1.npz)
@@ -1520,6 +1549,27 @@ def main():
        
     The most restrictive condition determines the final timestep, ensuring
     numerical stability and physical accuracy across all scales.
+    
+    Manual Timestep Override:
+    Users can now manually specify timesteps using command line arguments:
+    
+    --warmup_timestep: Override automatic calculation for warmup phase
+    - Takes precedence over training data timestep and CFD calculations
+    - Useful for matching specific experimental conditions
+    - System validates timestep is positive and warns if > 0.1 (potentially unstable)
+    
+    --training_timestep: Override automatic calculation for training data generation  
+    - Takes precedence over all other timestep sources
+    - Allows precise control over temporal resolution in generated data
+    - System validates timestep is positive and warns if > 0.1 (potentially unstable)
+    
+    Timestep Priority Order:
+    1. Manual specification (--warmup_timestep / --training_timestep) [HIGHEST]
+    2. Extracted from training/simulation data files
+    3. Computed using CFD stability criteria [FALLBACK]
+    
+    This provides flexibility for both automatic operation and manual control
+    when specific timestep requirements are needed.
     """
     parser = argparse.ArgumentParser(description='Generate turbulence training data using PICT')
     
@@ -1554,6 +1604,12 @@ def main():
                        help='Target CFL number for adaptive timestep')
     parser.add_argument('--visualize_max_steps', type=int, default=5,
                        help='Only visualize the first N steps (set None to disable limit)')
+    
+    # Manual timestep specification
+    parser.add_argument('--warmup_timestep', type=float, default=None,
+                       help='Manually specify timestep for warmup phase (overrides auto-calculation)')
+    parser.add_argument('--training_timestep', type=float, default=None,
+                       help='Manually specify timestep for training data generation (overrides auto-calculation)')
     
     # Resolution parameters
     parser.add_argument('--low_res', type=int, default=64)
@@ -1590,6 +1646,23 @@ def main():
     
     logger.info(f"Starting PICT turbulence data generation")
     logger.info(f"Parameters: {vars(args)}")
+    
+    # Validate manual timestep parameters
+    if args.warmup_timestep is not None:
+        if args.warmup_timestep <= 0:
+            logger.error(f"Invalid warmup_timestep: {args.warmup_timestep}. Must be positive.")
+            return
+        if args.warmup_timestep > 0.1:
+            logger.warning(f"Large warmup_timestep: {args.warmup_timestep}. This may cause numerical instability.")
+        logger.info(f"Manual warmup timestep specified: {args.warmup_timestep:.2e}")
+    
+    if args.training_timestep is not None:
+        if args.training_timestep <= 0:
+            logger.error(f"Invalid training_timestep: {args.training_timestep}. Must be positive.")
+            return
+        if args.training_timestep > 0.1:
+            logger.warning(f"Large training_timestep: {args.training_timestep}. This may cause numerical instability.")
+        logger.info(f"Manual training timestep specified: {args.training_timestep:.2e}")
     
     # Generate data
     generator = TurbulenceDataGenerator(args)
