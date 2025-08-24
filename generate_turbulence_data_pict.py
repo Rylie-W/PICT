@@ -279,8 +279,10 @@ class TurbulenceDataGenerator:
                 training_timestep = total_time / (num_timesteps - 1)
                 self.logger.info(f"Inferred timestep from total time: {training_timestep}")
             else:
-                # Last resort: use default or computed timestep 
-                self.logger.warning("Could not extract timestep from warmup data, will use training data timestep")
+                # Last resort: use computed CFD timestep 
+                self.logger.warning("Could not extract timestep from warmup data, will use computed CFD timestep")
+                training_timestep = self.compute_cfd_timestep(resolution)
+                self.logger.info(f"Using computed CFD timestep: {training_timestep:.2e}")
                 
         # Log additional information about the warmup data
         if 'time_array' in data.keys():
@@ -359,6 +361,104 @@ class TurbulenceDataGenerator:
         
         return velocity_tensor, training_timestep
 
+    def compute_cfd_timestep(self, resolution, velocity_field=None):
+        """
+        Compute timestep based on CFD stability criteria
+        
+        Args:
+            resolution: Grid resolution
+            velocity_field: Current velocity field for CFL calculation (optional)
+            
+        Returns:
+            timestep: Computed timestep based on stability criteria
+        """
+        # Physical parameters
+        domain_length = 2 * np.pi * self.args.domain_scale
+        dx = domain_length / resolution  # Grid spacing
+        nu = self.args.viscosity  # Kinematic viscosity
+        
+        # 1. CFL condition: Δt ≤ CFL * Δx / |u_max|
+        target_cfl = getattr(self.args, 'adaptive_cfl', 0.5)  # Conservative CFL number
+        
+        if velocity_field is not None:
+            # Use actual velocity field to compute maximum velocity
+            if isinstance(velocity_field, torch.Tensor):
+                velocity_magnitude = torch.sqrt(torch.sum(velocity_field**2, dim=1))
+                max_velocity = torch.max(velocity_magnitude).item()
+            else:
+                velocity_magnitude = np.sqrt(np.sum(velocity_field**2, axis=1))
+                max_velocity = np.max(velocity_magnitude)
+        else:
+            # Use specified maximum velocity from args
+            max_velocity = self.args.max_velocity
+        
+        # CFL-based timestep
+        dt_cfl = target_cfl * dx / max_velocity if max_velocity > 0 else 1e-3
+        
+        # 2. Viscous stability condition: Δt ≤ 0.5 * (Δx)² / ν
+        # For explicit viscous terms, diffusion number D = ν*Δt/(Δx)² ≤ 0.5
+        dt_viscous = 0.5 * dx**2 / nu if nu > 0 else 1e10
+        
+        # 3. Kolmogorov time scale consideration for turbulent flows
+        # τ_η = √(ν/ε) where ε is dissipation rate
+        # Estimate dissipation rate: ε ≈ u³/L where u is velocity scale, L is length scale
+        integral_scale_factor = getattr(self.args, 'integral_scale_factor', 6.0)
+        L_integral = domain_length / integral_scale_factor  # Integral length scale
+        
+        # Estimate energy dissipation rate
+        u_rms = max_velocity / np.sqrt(3)  # Rough estimate of RMS velocity
+        epsilon = u_rms**3 / L_integral if L_integral > 0 else 1e-6
+        
+        # Kolmogorov time scale
+        tau_eta = np.sqrt(nu / epsilon) if epsilon > 0 else 1e10
+        
+        # For accurate DNS, timestep should be much smaller than Kolmogorov time
+        dt_kolmogorov = 0.1 * tau_eta  # Conservative factor
+        
+        # 4. Acoustic/pressure wave stability (for compressible effects)
+        # For incompressible flows, this is less critical, but we include it for completeness
+        # Acoustic CFL: Δt ≤ Δx / c where c is sound speed
+        # For incompressible flow, we use a characteristic velocity instead
+        c_characteristic = max_velocity * 10  # Rough estimate
+        dt_acoustic = 0.1 * dx / c_characteristic if c_characteristic > 0 else 1e10
+        
+        # Take the most restrictive condition
+        dt_computed = min(dt_cfl, dt_viscous, dt_kolmogorov, dt_acoustic)
+        
+        # Apply safety factor
+        safety_factor = getattr(self.args, 'cfl_safety_factor', 0.8)
+        dt_final = safety_factor * dt_computed
+        
+        # Ensure reasonable bounds
+        dt_min = 1e-6  # Minimum timestep to avoid numerical issues
+        dt_max = 0.01  # Maximum timestep for stability
+        dt_final = max(dt_min, min(dt_max, dt_final))
+        
+        # Log timestep analysis
+        self.logger.info(f"CFD Timestep Analysis for resolution {resolution}:")
+        self.logger.info(f"  Grid spacing (dx): {dx:.6f}")
+        self.logger.info(f"  Max velocity: {max_velocity:.3f}")
+        self.logger.info(f"  Viscosity: {nu:.2e}")
+        self.logger.info(f"  Target CFL: {target_cfl:.2f}")
+        self.logger.info(f"  CFL timestep: {dt_cfl:.2e}")
+        self.logger.info(f"  Viscous timestep: {dt_viscous:.2e}")
+        self.logger.info(f"  Kolmogorov timestep: {dt_kolmogorov:.2e}")
+        self.logger.info(f"  Acoustic timestep: {dt_acoustic:.2e}")
+        self.logger.info(f"  Safety factor: {safety_factor:.2f}")
+        self.logger.info(f"  Final computed timestep: {dt_final:.2e}")
+        
+        # Physical parameter verification
+        Re_grid = max_velocity * dx / nu  # Grid Reynolds number
+        Pe_grid = max_velocity * dx / nu  # Grid Peclet number (same as Re for momentum)
+        self.logger.info(f"  Grid Reynolds number: {Re_grid:.1f}")
+        self.logger.info(f"  Grid Peclet number: {Pe_grid:.1f}")
+        
+        # Check if resolution is adequate for DNS
+        if Re_grid > 2:
+            self.logger.warning(f"Grid Reynolds number {Re_grid:.1f} > 2: Resolution may be insufficient for DNS")
+        
+        return dt_final
+
     def load_timestep_from_simulation_data(self, resolution):
         """Load timestep from simulation data for the specified resolution"""
         training_data_dir = Path(self.args.training_data_dir)
@@ -366,7 +466,10 @@ class TurbulenceDataGenerator:
         
         if not data_file.exists():
             self.logger.warning(f"Simulation data file not found for timestep extraction: {data_file}")
-            return None
+            # Fallback to computed timestep
+            computed_timestep = self.compute_cfd_timestep(resolution)
+            self.logger.info(f"Using computed CFD timestep: {computed_timestep:.2e}")
+            return computed_timestep
             
         self.logger.info(f"Loading timestep from simulation data: {data_file}")
         
@@ -396,6 +499,19 @@ class TurbulenceDataGenerator:
         
         if timestep is None:
             self.logger.warning(f"Could not extract timestep from simulation data: {data_file}")
+            # Fallback to computed timestep
+            computed_timestep = self.compute_cfd_timestep(resolution)
+            self.logger.info(f"Using computed CFD timestep: {computed_timestep:.2e}")
+            return computed_timestep
+        
+        # Verify that the loaded timestep is reasonable
+        computed_timestep = self.compute_cfd_timestep(resolution)
+        if timestep > 2 * computed_timestep:
+            self.logger.warning(f"Loaded timestep {timestep:.2e} is much larger than computed stable timestep {computed_timestep:.2e}")
+            self.logger.warning("This may lead to numerical instability")
+        elif timestep < 0.1 * computed_timestep:
+            self.logger.info(f"Loaded timestep {timestep:.2e} is much smaller than computed timestep {computed_timestep:.2e}")
+            self.logger.info("This is conservative and should be stable")
         
         return timestep
 
@@ -476,8 +592,10 @@ class TurbulenceDataGenerator:
                 training_timestep = total_time / (num_timesteps - 1)
                 self.logger.info(f"Inferred timestep from total time: {training_timestep}")
             else:
-                # Last resort: use default or computed timestep 
-                self.logger.warning("Could not extract timestep from training data, will use computed timestep")
+                # Last resort: use computed CFD timestep 
+                self.logger.warning("Could not extract timestep from training data, will use computed CFD timestep")
+                training_timestep = self.compute_cfd_timestep(resolution)
+                self.logger.info(f"Using computed CFD timestep: {training_timestep:.2e}")
                 
         # Log additional information about the training data
         if 'time_array' in data.keys():
@@ -759,6 +877,10 @@ class TurbulenceDataGenerator:
         
         # Set velocity field
         block.setVelocity(velocity)
+        
+        # Compute and log optimal timestep for this velocity field
+        optimal_timestep = self.compute_cfd_timestep(resolution, velocity)
+        self.logger.info(f"Optimal CFD timestep for this initial field: {optimal_timestep:.2e}")
         
         return velocity
     
@@ -1055,9 +1177,9 @@ class TurbulenceDataGenerator:
             output_time_step = hr_training_timestep
             self.logger.info(f"Using training data timestep for warmup: {hr_training_timestep}")
         else:
-            # Use PICT native adaptive timestep - calculate warmup steps based on output interval
-            output_time_step = 0.001  # Small base timestep for output intervals
-            self.logger.info(f"Using default output timestep for warmup: {output_time_step}")
+            # Use computed CFD timestep for warmup
+            output_time_step = self.compute_cfd_timestep(self.args.high_res)
+            self.logger.info(f"Using computed CFD timestep for warmup: {output_time_step:.2e}")
             
         warmup_steps = round(self.args.warmup_time / output_time_step)
         
@@ -1157,9 +1279,9 @@ class TurbulenceDataGenerator:
         
         # Calculate timestep if not provided
         if timestep is None:
-            # Use default timestep if none provided
-            timestep = 0.001
-            self.logger.info(f"Using default timestep for saving: {timestep}")
+            # Use computed CFD timestep instead of arbitrary default
+            timestep = self.compute_cfd_timestep(resolution)
+            self.logger.info(f"Using computed CFD timestep for saving: {timestep:.2e}")
         else:
             self.logger.info(f"Using provided timestep for saving: {timestep}")
         
@@ -1229,8 +1351,9 @@ class TurbulenceDataGenerator:
         
         # Calculate timestep if not provided
         if timestep is None:
-            timestep = 0.001
-            self.logger.info(f"Using default timestep for warmup data: {timestep}")
+            # Use computed CFD timestep instead of arbitrary default
+            timestep = self.compute_cfd_timestep(resolution)
+            self.logger.info(f"Using computed CFD timestep for warmup data: {timestep:.2e}")
         else:
             self.logger.info(f"Using provided timestep for warmup data: {timestep}")
         
@@ -1304,6 +1427,13 @@ def main():
        that PICT simulations use the same temporal resolution as the training data.
     2. Support for warmup data initialization with --use_warmup_data_init flag.
        This allows loading initial conditions from warmup_data directory.
+    3. Professional CFD timestep calculation based on stability criteria:
+       - CFL condition (Courant-Friedrichs-Lewy): Δt ≤ CFL * Δx / |u_max|
+       - Viscous stability: Δt ≤ 0.5 * (Δx)² / ν 
+       - Kolmogorov time scale: Δt ≤ 0.1 * √(ν/ε)
+       - Acoustic stability for pressure waves
+       - Grid Reynolds number verification for DNS adequacy
+       - Automatic fallback to computed timestep when data is unavailable
     
     Usage examples:
     
@@ -1357,8 +1487,39 @@ def main():
     Training data timestep extraction:
     - Looks for 'delta_t' field in data files
     - Falls back to calculating from 'time_array' if available
-    - Uses computed timestep if data timestep cannot be extracted
+    - Uses computed CFD timestep if data timestep cannot be extracted
     - Saves timestep information in generated data files for consistency
+    
+    CFD Timestep Calculation:
+    The system automatically computes stable timesteps based on multiple criteria:
+    
+    1. CFL (Convective) Stability: Δt ≤ CFL_target * Δx / |u_max|
+       - Ensures numerical stability for convective terms
+       - Default CFL_target = 0.5 (conservative)
+       - Uses actual maximum velocity from field or args.max_velocity
+       
+    2. Viscous (Diffusive) Stability: Δt ≤ 0.5 * (Δx)² / ν
+       - Prevents instability in diffusive terms
+       - Critical for explicit viscous schemes
+       - Diffusion number D = ν*Δt/(Δx)² ≤ 0.5
+       
+    3. Kolmogorov Time Scale: Δt ≤ 0.1 * τ_η where τ_η = √(ν/ε)
+       - Ensures proper resolution of smallest turbulent scales
+       - Energy dissipation rate ε estimated as u³/L_integral
+       - Essential for accurate DNS of turbulent flows
+       
+    4. Acoustic Stability: Δt ≤ 0.1 * Δx / c_characteristic
+       - Accounts for pressure wave propagation
+       - Less critical for incompressible flows but included for robustness
+       
+    5. Physical Parameter Verification:
+       - Grid Reynolds number Re_grid = u*Δx/ν
+       - Warning if Re_grid > 2 (insufficient resolution for DNS)
+       - Timestep bounds: 1e-6 ≤ Δt ≤ 0.01
+       - Safety factor applied (default 0.8)
+       
+    The most restrictive condition determines the final timestep, ensuring
+    numerical stability and physical accuracy across all scales.
     """
     parser = argparse.ArgumentParser(description='Generate turbulence training data using PICT')
     
