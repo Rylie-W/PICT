@@ -218,21 +218,12 @@ class TurbulenceDataGenerator:
         segment_file = warmup_data_dir / f"{resolution}" / f"decaying_turbulence_v2_warmup_segment_{warmup_segment}_step_{warmup_segment*50}_index_1.npz"
         
         if segment_file.exists():
-            self.logger.info(f"Loading initial velocity from warmup segment: {segment_file}")
             data_file = segment_file
         else:
             # Fallback to resolution-based warmup data file if available
             data_file = warmup_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
-            if data_file.exists():
-                self.logger.info(f"Loading initial velocity from warmup resolution data: {data_file}")
-            else:
-                self.logger.warning(f"Neither warmup segment nor resolution data found")
-                self.logger.info(f"Tried: {segment_file}")
-                self.logger.info(f"Tried: {data_file}")
-                self.logger.info("Falling back to regular training data")
+            if not data_file.exists():
                 return self.load_initial_velocity_from_training_data(resolution)
-            
-        self.logger.info(f"Loading initial velocity from warmup data: {data_file}")
         
         # Load the data
         data = np.load(data_file)
@@ -243,96 +234,66 @@ class TurbulenceDataGenerator:
         training_timestep = None
         
         # Check for delta_t (the actual timestep field in our training data)
-        keys = data.keys()
         if 'delta_t' in data.keys():
             training_timestep = float(data['delta_t'])
-            self.logger.info(f"Found delta_t timestep in warmup data: {training_timestep}")
         elif 'timestep' in data.keys():
             # Alternative timestep field name
             training_timestep = float(data['timestep'])
-            self.logger.info(f"Found explicit timestep in warmup data: {training_timestep}")
         elif 'dt' in data.keys():
             # Another alternative timestep field name
             training_timestep = float(data['dt'])
-            self.logger.info(f"Found dt timestep in warmup data: {training_timestep}")
         elif 'warmup_time_step' in data.keys():
             # Another alternative timestep field name
             training_timestep = float(data['warmup_time_step'])
-            self.logger.info(f"Found warmup_time_step timestep in warmup data: {training_timestep}")
         elif 'time_array' in data.keys():
             # If time_array is stored, calculate timestep from it
             time_array = data['time_array']
             if len(time_array) > 1:
                 training_timestep = float(time_array[1] - time_array[0])
-                self.logger.info(f"Calculated timestep from time_array: {training_timestep}")
         elif 'time' in data.keys():
             # Fallback to 'time' field
             time_array = data['time']
             if len(time_array) > 1:
                 training_timestep = float(time_array[1] - time_array[0])
-                self.logger.info(f"Calculated timestep from time array: {training_timestep}")
         else:
             # Try to infer timestep from number of time steps and total simulation time
             num_timesteps = u_data.shape[0]
             if 'total_time' in data.keys():
                 total_time = float(data['total_time'])
                 training_timestep = total_time / (num_timesteps - 1)
-                self.logger.info(f"Inferred timestep from total time: {training_timestep}")
             else:
                 # Last resort: use computed CFD timestep 
-                self.logger.warning("Could not extract timestep from warmup data, will use computed CFD timestep")
                 training_timestep = self.compute_cfd_timestep(resolution)
-                self.logger.info(f"Using computed CFD timestep: {training_timestep:.2e}")
-                
-        # Log additional information about the warmup data
-        if 'time_array' in data.keys():
-            time_array = data['time_array']
-            total_time = time_array[-1] - time_array[0]
-            self.logger.info(f"Warmup data time range: {time_array[0]:.6f} to {time_array[-1]:.6f} (total: {total_time:.6f})")
-            
-        if 'outer_steps' in data.keys():
-            self.logger.info(f"Warmup data outer steps: {data['outer_steps']}")
         
         # Extract velocity field - handle different data structures
         if len(u_data.shape) == 3:
             # Regular training data format: [time, y, x]
             u_t0 = u_data[0, :, :]  # [y, x]
             v_t0 = v_data[0, :, :]  # [y, x]
-            self.logger.info("Using time=0 velocity from 3D data array")
         elif len(u_data.shape) == 2:
             # Warmup segment format: [y, x] - single snapshot
             u_t0 = u_data  # [y, x]
             v_t0 = v_data  # [y, x]
-            self.logger.info("Using velocity from 2D warmup segment data")
         else:
-            self.logger.error(f"Unexpected data shape: u={u_data.shape}, v={v_data.shape}")
-            self.logger.info("Falling back to regular training data")
             return self.load_initial_velocity_from_training_data(resolution)
         
         # Check if we need to resample the data to match target resolution
         actual_resolution = u_t0.shape[0]  # Assuming square domain
-        self.logger.info(f"Warmup data resolution: {actual_resolution}x{actual_resolution}")
-        self.logger.info(f"Target resolution: {resolution}x{resolution}")
         
         if actual_resolution != resolution:
-            self.logger.info(f"Resampling warmup data from {actual_resolution}x{actual_resolution} to {resolution}x{resolution}")
             # Simple resampling using scipy zoom
             try:
                 from scipy.ndimage import zoom
                 zoom_factor = resolution / actual_resolution
                 u_t0 = zoom(u_t0, zoom_factor, order=1)  # Linear interpolation
                 v_t0 = zoom(v_t0, zoom_factor, order=1)
-                self.logger.info(f"Resampled velocity field to shape: {u_t0.shape}")
             except ImportError:
-                self.logger.warning("scipy not available, using simple downsampling")
                 # Fallback to simple downsampling
                 if actual_resolution > resolution:
                     factor = actual_resolution // resolution
                     u_t0 = u_t0[::factor, ::factor]
                     v_t0 = v_t0[::factor, ::factor]
                 else:
-                    self.logger.error(f"Cannot upsample from {actual_resolution} to {resolution} without scipy")
-                    self.logger.info("Falling back to regular training data")
                     return self.load_initial_velocity_from_training_data(resolution)
         
         # Convert to PICT format: [1, channels, y, x]
@@ -348,16 +309,6 @@ class TurbulenceDataGenerator:
         
         # Convert to torch tensor
         velocity_tensor = torch.from_numpy(velocity).to(dtype=self.dtype, device=cuda_device)
-        
-        # Log statistics
-        max_vel = torch.max(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
-        mean_vel = torch.mean(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
-        self.logger.info(f"Loaded warmup velocity statistics - Max: {max_vel:.3f}, Mean: {mean_vel:.3f}")
-        
-        # Verify divergence if 2D
-        if self.args.dims == 2:
-            div_rms = self._verify_divergence_free(velocity_tensor, resolution)
-            self.logger.info(f"Loaded warmup velocity field RMS divergence: {div_rms:.2e}")
         
         return velocity_tensor, training_timestep
 
@@ -434,28 +385,9 @@ class TurbulenceDataGenerator:
         dt_max = 0.01  # Maximum timestep for stability
         dt_final = max(dt_min, min(dt_max, dt_final))
         
-        # Log timestep analysis
-        self.logger.info(f"CFD Timestep Analysis for resolution {resolution}:")
-        self.logger.info(f"  Grid spacing (dx): {dx:.6f}")
-        self.logger.info(f"  Max velocity: {max_velocity:.3f}")
-        self.logger.info(f"  Viscosity: {nu:.2e}")
-        self.logger.info(f"  Target CFL: {target_cfl:.2f}")
-        self.logger.info(f"  CFL timestep: {dt_cfl:.2e}")
-        self.logger.info(f"  Viscous timestep: {dt_viscous:.2e}")
-        self.logger.info(f"  Kolmogorov timestep: {dt_kolmogorov:.2e}")
-        self.logger.info(f"  Acoustic timestep: {dt_acoustic:.2e}")
-        self.logger.info(f"  Safety factor: {safety_factor:.2f}")
-        self.logger.info(f"  Final computed timestep: {dt_final:.2e}")
-        
-        # Physical parameter verification
+        # Physical parameter verification (silent)
         Re_grid = max_velocity * dx / nu  # Grid Reynolds number
         Pe_grid = max_velocity * dx / nu  # Grid Peclet number (same as Re for momentum)
-        self.logger.info(f"  Grid Reynolds number: {Re_grid:.1f}")
-        self.logger.info(f"  Grid Peclet number: {Pe_grid:.1f}")
-        
-        # Check if resolution is adequate for DNS
-        if Re_grid > 2:
-            self.logger.warning(f"Grid Reynolds number {Re_grid:.1f} > 2: Resolution may be insufficient for DNS")
         
         return dt_final
 
@@ -465,53 +397,33 @@ class TurbulenceDataGenerator:
         data_file = training_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
         
         if not data_file.exists():
-            self.logger.warning(f"Simulation data file not found for timestep extraction: {data_file}")
             # Fallback to computed timestep
             computed_timestep = self.compute_cfd_timestep(resolution)
-            self.logger.info(f"Using computed CFD timestep: {computed_timestep:.2e}")
             return computed_timestep
             
-        self.logger.info(f"Loading timestep from simulation data: {data_file}")
-        
         data = np.load(data_file)
         
         # Extract timestep information using the same logic as training data
         timestep = None
         if 'delta_t' in data.keys():
             timestep = float(data['delta_t'])
-            self.logger.info(f"Found delta_t timestep: {timestep}")
         elif 'timestep' in data.keys():
             timestep = float(data['timestep'])
-            self.logger.info(f"Found explicit timestep: {timestep}")
         elif 'dt' in data.keys():
             timestep = float(data['dt'])
-            self.logger.info(f"Found dt timestep: {timestep}")
         elif 'time_array' in data.keys():
             time_array = data['time_array']
             if len(time_array) > 1:
                 timestep = float(time_array[1] - time_array[0])
-                self.logger.info(f"Calculated timestep from time_array: {timestep}")
         elif 'time' in data.keys():
             time_array = data['time']
             if len(time_array) > 1:
                 timestep = float(time_array[1] - time_array[0])
-                self.logger.info(f"Calculated timestep from time array: {timestep}")
         
         if timestep is None:
-            self.logger.warning(f"Could not extract timestep from simulation data: {data_file}")
             # Fallback to computed timestep
             computed_timestep = self.compute_cfd_timestep(resolution)
-            self.logger.info(f"Using computed CFD timestep: {computed_timestep:.2e}")
             return computed_timestep
-        
-        # Verify that the loaded timestep is reasonable
-        computed_timestep = self.compute_cfd_timestep(resolution)
-        if timestep > 2 * computed_timestep:
-            self.logger.warning(f"Loaded timestep {timestep:.2e} is much larger than computed stable timestep {computed_timestep:.2e}")
-            self.logger.warning("This may lead to numerical instability")
-        elif timestep < 0.1 * computed_timestep:
-            self.logger.info(f"Loaded timestep {timestep:.2e} is much smaller than computed timestep {computed_timestep:.2e}")
-            self.logger.info("This is conservative and should be stable")
         
         return timestep
 
@@ -521,21 +433,14 @@ class TurbulenceDataGenerator:
         data_file = training_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
         
         if not data_file.exists():
-            self.logger.warning(f"Reference training data file not found: {data_file}")
             return None, None
             
-        self.logger.info(f"Loading reference training data: {data_file}")
-        
         data = np.load(data_file)
         u_data = data['u']  # Shape: [time, y, x]
         v_data = data['v']  # Shape: [time, y, x]
         
         # Extract timestep information
         reference_timestep = self.load_timestep_from_simulation_data(resolution)
-        
-        self.logger.info(f"Reference data shape: u={u_data.shape}, v={v_data.shape}")
-        if reference_timestep:
-            self.logger.info(f"Reference timestep: {reference_timestep}")
             
         return (u_data, v_data), reference_timestep
 
@@ -546,12 +451,8 @@ class TurbulenceDataGenerator:
         data_file = training_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
         
         if not data_file.exists():
-            self.logger.warning(f"Training data file not found: {data_file}")
-            self.logger.info("Falling back to generated initial conditions")
             return None, None
             
-        self.logger.info(f"Loading initial velocity from: {data_file}")
-        
         # Load the data
         data = np.load(data_file)
         u_data = data['u']  # Shape: [time, y, x]
@@ -563,48 +464,31 @@ class TurbulenceDataGenerator:
         # Check for delta_t (the actual timestep field in our training data)
         if 'delta_t' in data.keys():
             training_timestep = float(data['delta_t'])
-            self.logger.info(f"Found delta_t timestep in training data: {training_timestep}")
         elif 'timestep' in data.keys():
             # Alternative timestep field name
             training_timestep = float(data['timestep'])
-            self.logger.info(f"Found explicit timestep in training data: {training_timestep}")
         elif 'dt' in data.keys():
             # Another alternative timestep field name
             training_timestep = float(data['dt'])
-            self.logger.info(f"Found dt timestep in training data: {training_timestep}")
         elif 'time_array' in data.keys():
             # If time_array is stored, calculate timestep from it
             time_array = data['time_array']
             if len(time_array) > 1:
                 training_timestep = float(time_array[1] - time_array[0])
-                self.logger.info(f"Calculated timestep from time_array: {training_timestep}")
         elif 'time' in data.keys():
             # Fallback to 'time' field
             time_array = data['time']
             if len(time_array) > 1:
                 training_timestep = float(time_array[1] - time_array[0])
-                self.logger.info(f"Calculated timestep from time array: {training_timestep}")
         else:
             # Try to infer timestep from number of time steps and total simulation time
             num_timesteps = u_data.shape[0]
             if 'total_time' in data.keys():
                 total_time = float(data['total_time'])
                 training_timestep = total_time / (num_timesteps - 1)
-                self.logger.info(f"Inferred timestep from total time: {training_timestep}")
             else:
                 # Last resort: use computed CFD timestep 
-                self.logger.warning("Could not extract timestep from training data, will use computed CFD timestep")
                 training_timestep = self.compute_cfd_timestep(resolution)
-                self.logger.info(f"Using computed CFD timestep: {training_timestep:.2e}")
-                
-        # Log additional information about the training data
-        if 'time_array' in data.keys():
-            time_array = data['time_array']
-            total_time = time_array[-1] - time_array[0]
-            self.logger.info(f"Training data time range: {time_array[0]:.6f} to {time_array[-1]:.6f} (total: {total_time:.6f})")
-            
-        if 'outer_steps' in data.keys():
-            self.logger.info(f"Training data outer steps: {data['outer_steps']}")
         
         # Extract t=0 velocity field
         u_t0 = u_data[0, :, :]  # [y, x]
@@ -623,16 +507,6 @@ class TurbulenceDataGenerator:
         
         # Convert to torch tensor
         velocity_tensor = torch.from_numpy(velocity).to(dtype=self.dtype, device=cuda_device)
-        
-        # Log statistics
-        max_vel = torch.max(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
-        mean_vel = torch.mean(torch.sqrt(torch.sum(velocity_tensor**2, dim=1))).item()
-        self.logger.info(f"Loaded velocity statistics - Max: {max_vel:.3f}, Mean: {mean_vel:.3f}")
-        
-        # Verify divergence if 2D
-        if self.args.dims == 2:
-            div_rms = self._verify_divergence_free(velocity_tensor, resolution)
-            self.logger.info(f"Loaded velocity field RMS divergence: {div_rms:.2e}")
         
         return velocity_tensor, training_timestep
     
@@ -680,12 +554,10 @@ class TurbulenceDataGenerator:
             u_ref_step = u_ref[step, :, :]
             v_ref_step = v_ref[step, :, :]
         else:
-            self.logger.warning(f"Step {step} exceeds reference data length {u_ref.shape[0]}")
             return
         
         # Ensure same shape
         if u_pict.shape != u_ref_step.shape:
-            self.logger.warning(f"Shape mismatch: PICT {u_pict.shape} vs Reference {u_ref_step.shape}")
             return
         
         # Calculate differences
@@ -703,10 +575,7 @@ class TurbulenceDataGenerator:
         max_v_diff = np.max(np.abs(v_diff))
         max_mag_diff = np.max(np.abs(magnitude_diff))
         
-        self.logger.info(f"Step {step} comparison:")
-        self.logger.info(f"  U-velocity RMSE: {u_rmse:.6f}, Max diff: {max_u_diff:.6f}")
-        self.logger.info(f"  V-velocity RMSE: {v_rmse:.6f}, Max diff: {max_v_diff:.6f}")
-        self.logger.info(f"  Magnitude RMSE: {mag_rmse:.6f}, Max diff: {max_mag_diff:.6f}")
+
         
         # Create comparison plots
         comparison_dir = Path(save_dir) / f"comparison_step_{step}"
@@ -780,7 +649,7 @@ class TurbulenceDataGenerator:
             f.write(f"Max V difference: {max_v_diff:.6f}\n")
             f.write(f"Max magnitude difference: {max_mag_diff:.6f}\n")
         
-        self.logger.info(f"Saved comparison visualization: {comparison_file}")
+
         return {
             'u_rmse': u_rmse, 'v_rmse': v_rmse, 'mag_rmse': mag_rmse,
             'max_u_diff': max_u_diff, 'max_v_diff': max_v_diff, 'max_mag_diff': max_mag_diff
@@ -794,23 +663,6 @@ class TurbulenceDataGenerator:
         # Get resolution for verification
         resolution = block_size.x if dims == 2 else block_size.x
         
-        self.logger.info(f"Generating divergence-free turbulent field for {resolution}^{dims} domain")
-        
-        # Calculate and log physical parameters (must match _generate_divergence_free_field)
-        domain_size = resolution
-        integral_scale_factor = getattr(self.args, 'integral_scale_factor', 6.0)
-        Re_lambda = getattr(self.args, 'taylor_reynolds', 50.0)
-        
-        L_integral = domain_size / integral_scale_factor  # Integral length scale (pixels)
-        eta_over_L = Re_lambda**(-3/4)  # Kolmogorov scale / integral scale
-        L_kolmogorov = eta_over_L * L_integral  # Kolmogorov length scale
-        
-        self.logger.info(f"Physical parameters:")
-        self.logger.info(f"  - Integral length scale: {L_integral:.1f} grid points ({L_integral/resolution:.3f} domain size)")
-        self.logger.info(f"  - Taylor microscale Re: {Re_lambda:.1f}")
-        self.logger.info(f"  - Kolmogorov scale: {L_kolmogorov:.3f} grid points")
-        self.logger.info(f"  - Scale separation ratio: {L_integral/L_kolmogorov:.1f}")
-        
         # Generate random velocity field
         if dims == 3:
             shape = [1, dims, block_size.z, block_size.y, block_size.x]  # [1, 3, z, y, x]
@@ -820,80 +672,22 @@ class TurbulenceDataGenerator:
         # Create divergence-free velocity field using improved vector potential method
         velocity = self._generate_divergence_free_field(shape, self.args.peak_wavenumber)
         
-        # Verify divergence-free property
-        if dims == 2:
-            div_rms = self._verify_divergence_free(velocity, resolution)
-            self.logger.info(f"Initial velocity field RMS divergence: {div_rms:.2e}")
-        
-        # Calculate energy spectrum for verification
-        if dims == 2:
-            u_data = velocity[0, 0, :, :].detach().cpu().numpy()
-            v_data = velocity[0, 1, :, :].detach().cpu().numpy()
-            
-            # Compute 2D FFT and energy spectrum
-            u_fft = np.fft.fft2(u_data)
-            v_fft = np.fft.fft2(v_data)
-            energy_2d = 0.5 * (np.abs(u_fft)**2 + np.abs(v_fft)**2)
-            
-            # Radially average to get 1D spectrum
-            kx = np.fft.fftfreq(resolution)
-            ky = np.fft.fftfreq(resolution)
-            KX, KY = np.meshgrid(kx, ky)
-            k_mag = np.sqrt(KX**2 + KY**2)
-            
-            # Find energy at key wavenumbers
-            k0 = 1.0 / L_integral
-            k_integral_idx = np.argmin(np.abs(k_mag - k0))
-            energy_at_k0 = energy_2d.flat[k_integral_idx]
-            
-            self.logger.info(f"Energy spectrum verification:")
-            self.logger.info(f"  - Energy at integral scale (k0={k0:.3f}): {energy_at_k0:.2e}")
-        
         # Scale to desired maximum velocity
         velocity_magnitude = torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))
         max_vel = torch.max(velocity_magnitude).item()
-        mean_vel = torch.mean(velocity_magnitude).item()
-        
-        # Calculate turbulent kinetic energy
-        tke = 0.5 * torch.mean(velocity_magnitude**2).item()
-        
-        self.logger.info(f"Velocity statistics before scaling:")
-        self.logger.info(f"  - Max velocity: {max_vel:.3f}")
-        self.logger.info(f"  - Mean velocity magnitude: {mean_vel:.3f}")
-        self.logger.info(f"  - Turbulent kinetic energy: {tke:.3f}")
         
         velocity = velocity * (self.args.max_velocity / max_vel)
         
-        # Log final statistics
-        final_max = torch.max(torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))).item()
-        final_mean = torch.mean(torch.sqrt(torch.sum(velocity**2, dim=1, keepdim=True))).item()
-        final_tke = 0.5 * torch.mean(velocity**2).item()
-        
-        self.logger.info(f"Final velocity statistics after scaling:")
-        self.logger.info(f"  - Max velocity: {final_max:.3f}")
-        self.logger.info(f"  - Mean velocity magnitude: {final_mean:.3f}")
-        self.logger.info(f"  - Turbulent kinetic energy: {final_tke:.3f}")
-        self.logger.info(f"  - Velocity scaling factor: {self.args.max_velocity / max_vel:.3f}")
-        
         # Set velocity field
         block.setVelocity(velocity)
-        
-        # Compute and log optimal timestep for this velocity field
-        optimal_timestep = self.compute_cfd_timestep(resolution, velocity)
-        self.logger.info(f"Optimal CFD timestep for this initial field: {optimal_timestep:.2e}")
         
         return velocity
     
     def run_simulation_with_comparison(self, sim, domain, resolution, steps, save_interval):
         """Run simulation with step-by-step comparison to reference data using existing simulation instance"""
-        self.logger.info(f"Running simulation with comparison at {resolution}^{domain.getSpatialDims()} resolution for {steps} steps")
         
         # Load reference data for comparison
         reference_data, ref_timestep = self.load_reference_training_data(resolution)
-        if reference_data is not None:
-            self.logger.info("Loaded reference data for comparison")
-        else:
-            self.logger.warning("No reference data available for comparison")
         
         # Storage for trajectory data and comparison results
         trajectory_data = []
@@ -926,7 +720,7 @@ class TurbulenceDataGenerator:
                 if stats:
                     comparison_stats.append(stats)
             
-            self.logger.info(f"Completed step {step}/{steps} at resolution {resolution}")
+
         
         # Save comparison summary
         if comparison_stats:
@@ -940,7 +734,7 @@ class TurbulenceDataGenerator:
         if getattr(self.args, 'enable_comparison', False):
             return self.run_simulation_with_comparison(sim, domain, resolution, steps, save_interval)
         
-        self.logger.info(f"Running simulation at {resolution}^{domain.getSpatialDims()} resolution for {steps} steps")
+
         
         # Storage for trajectory data
         trajectory_data = []
@@ -955,8 +749,7 @@ class TurbulenceDataGenerator:
             velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
             trajectory_data.append(velocity.copy())
             
-            if step % (save_interval * 10) == 0:
-                self.logger.info(f"Completed {step}/{steps} steps at resolution {resolution}")
+
         
         return np.array(trajectory_data)
     
@@ -1036,8 +829,7 @@ class TurbulenceDataGenerator:
         plt.savefig(summary_plot_file, dpi=150, bbox_inches='tight')
         plt.close()
         
-        self.logger.info(f"Saved comparison summary: {summary_file}")
-        self.logger.info(f"Saved error evolution plot: {summary_plot_file}")
+
     
     def create_simulation(self, domain, time_step, log_interval, log_dir_name):
         """Create a PISOtorch simulation instance with consistent settings"""
@@ -1063,9 +855,6 @@ class TurbulenceDataGenerator:
     
     def warmup_simulation(self, sim, resolution, warmup_steps):
         """Run warmup simulation to reach statistically steady state using existing simulation instance"""
-        warmup_time = self.args.warmup_time
-        
-        self.logger.info(f"Running warmup for {warmup_steps} output steps (total time: {warmup_time}s) at resolution {resolution}")
         
         # Storage for warmup trajectory data
         warmup_trajectory = []
@@ -1087,9 +876,6 @@ class TurbulenceDataGenerator:
         # Convert to numpy array
         warmup_trajectory = np.array(warmup_trajectory)
         
-        self.logger.info(f"Warmup completed at resolution {resolution}")
-        self.logger.info(f"Collected warmup trajectory with shape: {warmup_trajectory.shape}")
-        
         return warmup_trajectory
     
 
@@ -1109,19 +895,10 @@ class TurbulenceDataGenerator:
     
     def generate_data(self):
         """Main data generation pipeline"""
-        self.logger.info("Starting turbulence data generation with PICT")
         
         # Check if we should use warmup data or training data for initialization
         use_warmup_data_init = getattr(self.args, 'use_warmup_data_init', False)
         use_training_data_init = getattr(self.args, 'use_training_data_init', False)
-        
-        # Warmup data takes priority over training data
-        if use_warmup_data_init:
-            self.logger.info("Using warmup data for initialization (still doing 4s warmup as requested)")
-        elif use_training_data_init:
-            self.logger.info("Using training data for initialization (skipping warmup)")
-        else:
-            self.logger.info("Using generated initial conditions with warmup")
         
         # Create high-resolution domain for initial conditions
         hr_domain, hr_block = self.create_domain(self.args.high_res)
@@ -1136,15 +913,8 @@ class TurbulenceDataGenerator:
                 hr_block.setVelocity(initial_velocity)
                 hr_domain.PrepareSolve()
                 hr_domain.UpdateDomainData()
-                self.logger.info("Successfully initialized from warmup data")
-                if hr_training_timestep is not None:
-                    self.logger.info(f"Will use warmup data timestep: {hr_training_timestep}")
-                
-                # Always run 4s warmup when using warmup data as requested
-                self.logger.info("Running 4s warmup as requested for warmup data initialization")
             else:
                 # Fallback to generated initial conditions
-                self.logger.info("Falling back to generated initial conditions")
                 initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
                 hr_domain.PrepareSolve()
                 
@@ -1158,12 +928,8 @@ class TurbulenceDataGenerator:
                 hr_block.setVelocity(initial_velocity)
                 hr_domain.PrepareSolve()
                 hr_domain.UpdateDomainData()
-                self.logger.info("Successfully initialized from training data")
-                if hr_training_timestep is not None:
-                    self.logger.info(f"Will use training data timestep: {hr_training_timestep}")
             else:
                 # Fallback to generated initial conditions
-                self.logger.info("Falling back to generated initial conditions")
                 initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
                 hr_domain.PrepareSolve()
                 
@@ -1176,14 +942,11 @@ class TurbulenceDataGenerator:
         if hasattr(self.args, 'warmup_timestep') and self.args.warmup_timestep is not None:
             # Use manually specified warmup timestep
             output_time_step = self.args.warmup_timestep
-            self.logger.info(f"Using manually specified warmup timestep: {output_time_step:.2e}")
         elif hr_training_timestep is not None:
             output_time_step = hr_training_timestep
-            self.logger.info(f"Using training data timestep for warmup: {hr_training_timestep}")
         else:
             # Use computed CFD timestep for warmup
             output_time_step = self.compute_cfd_timestep(self.args.high_res)
-            self.logger.info(f"Using computed CFD timestep for warmup: {output_time_step:.2e}")
             
         warmup_steps = round(self.args.warmup_time / output_time_step)
         
@@ -1212,7 +975,6 @@ class TurbulenceDataGenerator:
         # Different resolutions would require different domains, which breaks pressure continuity
         # So we only generate data for the high-resolution
         resolution = self.args.high_res
-        self.logger.info(f"Generating data for resolution {resolution} (pressure continuity requires single domain)")
         
         domain = hr_domain
         current_training_timestep = hr_training_timestep
@@ -1223,30 +985,22 @@ class TurbulenceDataGenerator:
             simulation_timestep = self.load_timestep_from_simulation_data(resolution)
             if simulation_timestep is not None:
                 current_training_timestep = simulation_timestep
-                self.logger.info(f"Using simulation data timestep {current_training_timestep} for resolution {resolution}")
-            else:
-                self.logger.info(f"Using warmup data timestep {current_training_timestep} for resolution {resolution}")
         
         # Determine final training timestep with manual override priority
         if hasattr(self.args, 'training_timestep') and self.args.training_timestep is not None:
             # Use manually specified training timestep (highest priority)
             final_training_timestep = self.args.training_timestep
-            self.logger.info(f"Using manually specified training timestep: {final_training_timestep:.2e}")
         elif current_training_timestep is not None:
             # Use timestep from training data or simulation data
             final_training_timestep = current_training_timestep
-            self.logger.info(f"Using extracted training timestep: {final_training_timestep:.2e}")
         elif hr_training_timestep is not None:
             # Fallback to hr_training_timestep
             final_training_timestep = hr_training_timestep
-            self.logger.info(f"Using hr_training_timestep: {final_training_timestep:.2e}")
         else:
             # Last resort: compute CFD timestep
             final_training_timestep = self.compute_cfd_timestep(resolution)
-            self.logger.info(f"Using computed CFD timestep for training: {final_training_timestep:.2e}")
         
         # CRITICAL: Use the same simulator instance to preserve ALL pressure info
-        self.logger.info(f"Using the same simulator instance to preserve complete pressure continuity")
         sim = hr_sim  # Always use the same simulation instance with same domain
         
         trajectory = self.run_simulation(
@@ -1259,7 +1013,6 @@ class TurbulenceDataGenerator:
         # If user wants multiple resolutions, we need to downsample the trajectory data
         # This preserves pressure continuity while providing multiple resolution outputs
         if self.args.low_res < self.args.high_res:
-            self.logger.info("Generating lower resolution data by downsampling trajectory")
             self._generate_downsampled_resolutions(trajectory, final_training_timestep)
     
     def _generate_downsampled_resolutions(self, trajectory, timestep):
@@ -1271,8 +1024,6 @@ class TurbulenceDataGenerator:
             res *= 2
         
         for target_resolution in resolution_list:
-            self.logger.info(f"Downsampling trajectory to resolution {target_resolution}")
-            
             # Downsample each frame in the trajectory
             downsampled_trajectory = []
             for frame in trajectory:
@@ -1285,8 +1036,6 @@ class TurbulenceDataGenerator:
             
             # Save the downsampled trajectory
             self.save_trajectory_data(downsampled_trajectory, target_resolution, timestep)
-            
-            self.logger.info(f"Generated {target_resolution}x{target_resolution} data by downsampling")
 
     def save_trajectory_data(self, trajectory, resolution, timestep=None):
         """Save trajectory data in numpy format"""
@@ -1301,9 +1050,6 @@ class TurbulenceDataGenerator:
         if timestep is None:
             # Use computed CFD timestep instead of arbitrary default
             timestep = self.compute_cfd_timestep(resolution)
-            self.logger.info(f"Using computed CFD timestep for saving: {timestep:.2e}")
-        else:
-            self.logger.info(f"Using provided timestep for saving: {timestep}")
         
         num_timesteps = trajectory.shape[0]
         time_array = np.arange(num_timesteps) * timestep
@@ -1358,24 +1104,17 @@ class TurbulenceDataGenerator:
                 peak_wavenumber=self.args.peak_wavenumber
             )
         
-        self.logger.info(f"Saved trajectory shape: {trajectory.shape}")
-        self.logger.info(f"Resolution: {resolution}x{resolution}, Steps: {self.args.generate_steps}")
-        self.logger.info(f"Timestep: {timestep}, Total time: {time_array[-1]:.6f}")
+
     
     def save_warmup_trajectory_data(self, warmup_trajectory, resolution, timestep=None):
         """Save complete warmup trajectory data in one file"""
         save_dir = Path(self.args.save_dir) / "warmup_data" / str(resolution)
         save_dir.mkdir(parents=True, exist_ok=True)
         
-        self.logger.info(f"Saving warmup trajectory data to: {save_dir}")
-        
         # Calculate timestep if not provided
         if timestep is None:
             # Use computed CFD timestep instead of arbitrary default
             timestep = self.compute_cfd_timestep(resolution)
-            self.logger.info(f"Using computed CFD timestep for warmup data: {timestep:.2e}")
-        else:
-            self.logger.info(f"Using provided timestep for warmup data: {timestep}")
         
         # Save the complete warmup trajectory - ALL STEPS IN ONE FILE
         trajectory_file = save_dir / f"warmup_trajectory_{resolution}x{resolution}_index_{self.args.save_index}.npz"
@@ -1432,9 +1171,6 @@ class TurbulenceDataGenerator:
             )
         
         self.logger.info(f"Saved complete warmup trajectory: {trajectory_file}")
-        self.logger.info(f"Warmup trajectory shape: {warmup_trajectory.shape}")
-        self.logger.info(f"Total steps: {num_timesteps}, Resolution: {resolution}x{resolution}")
-        self.logger.info(f"Timestep: {timestep}, Total time: {time_array[-1]:.6f}")
 
 
 def main():
@@ -1644,9 +1380,6 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger("Main")
     
-    logger.info(f"Starting PICT turbulence data generation")
-    logger.info(f"Parameters: {vars(args)}")
-    
     # Validate manual timestep parameters
     if args.warmup_timestep is not None:
         if args.warmup_timestep <= 0:
@@ -1654,7 +1387,6 @@ def main():
             return
         if args.warmup_timestep > 0.1:
             logger.warning(f"Large warmup_timestep: {args.warmup_timestep}. This may cause numerical instability.")
-        logger.info(f"Manual warmup timestep specified: {args.warmup_timestep:.2e}")
     
     if args.training_timestep is not None:
         if args.training_timestep <= 0:
@@ -1662,7 +1394,6 @@ def main():
             return
         if args.training_timestep > 0.1:
             logger.warning(f"Large training_timestep: {args.training_timestep}. This may cause numerical instability.")
-        logger.info(f"Manual training timestep specified: {args.training_timestep:.2e}")
     
     # Generate data
     generator = TurbulenceDataGenerator(args)

@@ -1267,7 +1267,7 @@ class Simulation:
                 print(f"\n=== Starting PISO step {step} ===")
                 
                 # 记录初始状态（强制可视化，初始状态使用传统方法）
-                initial_velocity, _ = log_velocity_change("Initial state", None, vis_dir, force_visualize=True, use_real_time_velocity=False)
+                # initial_velocity, _ = log_velocity_change("Initial state", None, vis_dir, force_visualize=True, use_real_time_velocity=False)
                 
                 if self.convergence_tol is not None:
                     self.__backend.CopyVelocityResultFromBlocks(domain)
@@ -1389,7 +1389,7 @@ class Simulation:
                         domain.UpdateDomainData()
                         
                         # 记录对流步骤后的变化（使用实时速度）
-                        _, _ = log_velocity_change("After advection", initial_velocity, vis_dir, use_real_time_velocity=True)
+                        # _, _ = log_velocity_change("After advection", initial_velocity, vis_dir, use_real_time_velocity=True)
                         
                     else:
                         self.__backend.CopyVelocityResultFromBlocks(domain) # needed for non-ortho components on RHS
@@ -1424,7 +1424,7 @@ class Simulation:
                     break
                 
                 # 记录修正步骤前的状态（使用实时速度）
-                pre_corrector_velocity, _ = log_velocity_change("Before corrector steps", initial_velocity, vis_dir, use_real_time_velocity=True)
+                #pre_corrector_velocity, _ = log_velocity_change("Before corrector steps", initial_velocity, vis_dir, use_real_time_velocity=True)
                 
                 for cstep in range(self.corrector_steps):
                     with SAMPLE("corrector step"):
@@ -1507,7 +1507,7 @@ class Simulation:
                         self.__backend.CorrectVelocity(domain, time_step, version=vcv, timeStepNorm=self.pressure_time_step_normalized) #vcv
 
                         # 记录每个修正步骤后的变化（使用实时速度）
-                        _, _ = log_velocity_change(f"After corrector step {cstep}", pre_corrector_velocity, vis_dir, use_real_time_velocity=True)
+                        # _, _ = log_velocity_change(f"After corrector step {cstep}", pre_corrector_velocity, vis_dir, use_real_time_velocity=True)
                         
                         self._run_prep_fn("POST_VELOCITY_CORRECTION", domain=domain, local_step=step, time_step=time_step, total_step=self.total_step)
                             
@@ -1516,7 +1516,7 @@ class Simulation:
                 
                 # 记录整个时间步结束后的最终变化（强制可视化，使用实时速度）
                 # 注意：这里使用 use_real_time_velocity=True 来直接读取 domain.velocityResult 中的实时计算结果
-                _, final_change_data = log_velocity_change("End of PISO step", initial_velocity, vis_dir, force_visualize=True, use_real_time_velocity=True)
+                # _, final_change_data = log_velocity_change("End of PISO step", initial_velocity, vis_dir, force_visualize=True, use_real_time_velocity=True)
                 
                 # 只在此处执行一次 CopyVelocityResultToBlocks，将实时计算结果复制到各个块中
                 # 这样确保整个算法中只有一次这个操作，避免重复和不必要的性能开销
