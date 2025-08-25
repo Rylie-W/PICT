@@ -1264,7 +1264,7 @@ class Simulation:
         
         for step in range(iterations):
             with SAMPLE("PISO step"):
-                print(f"\n=== Starting PISO step {step} ===")
+                #print(f"\n=== Starting PISO step {step} ===")
                 
                 # 记录初始状态（强制可视化，初始状态使用传统方法）
                 # initial_velocity, _ = log_velocity_change("Initial state", None, vis_dir, force_visualize=True, use_real_time_velocity=False)
@@ -1428,7 +1428,7 @@ class Simulation:
                 
                 for cstep in range(self.corrector_steps):
                     with SAMPLE("corrector step"):
-                        print(f"\n--- Corrector step {cstep} ---")
+                        #print(f"\n--- Corrector step {cstep} ---")
                         
                         if not self.non_orthogonal: # orthogonal version with gradient/backprop support
                             self.__backend.SetupPressureCorrection(domain, time_step, 0, pressure_use_face_transform, timeStepNorm=self.pressure_time_step_normalized)
@@ -1579,7 +1579,7 @@ class Simulation:
                 
                 if not sim_ok or self._check_stop():
                     return False
-        self.__LOG.info("Adaptive time step %.03e (CFL=%.02f) used %d substeps.", self.time_step, CFL_cond, substep)
+        #self.__LOG.info("Adaptive time step %.03e (CFL=%.02f) used %d substeps.", self.time_step, CFL_cond, substep)
         return True
     
     def run(self, iterations, static=False, log_domain=True):
