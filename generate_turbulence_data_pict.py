@@ -743,6 +743,9 @@ class TurbulenceDataGenerator:
         
         # Run simulation and collect data
         for step in range(0, steps, save_interval):
+            if step%1000 == 0:
+                percentage = (step / steps) * 100
+                print(f"Step {step} of {steps} ({percentage:.1f}%). ")
             sim.run(iterations=save_interval)
             
             # Get current velocity field
@@ -876,6 +879,7 @@ class TurbulenceDataGenerator:
         # Convert to numpy array
         warmup_trajectory = np.array(warmup_trajectory)
         
+        print("warmup_trajectory.shape", warmup_trajectory.shape)
         return warmup_trajectory
     
 
