@@ -753,10 +753,11 @@ class TurbulenceDataGenerator:
                     print(f"Saving trajectory data at step {step} with {len(trajectory_data)} time points...")
                     # 修改保存文件名包含步数
                     original_save_file = self.args.save_file
-                    original_save_file = f"{original_save_file}_step{step}"
+                    self.args.save_file = f"{original_save_file}_step{step}"
                     
                     self.save_trajectory_data(np.array(trajectory_data), resolution, self.args.training_timestep)
                     trajectory_data = []
+                    self.args.save_file = original_save_file
                     
                     # 强制垃圾回收
                     gc.collect()
@@ -771,9 +772,10 @@ class TurbulenceDataGenerator:
         if len(trajectory_data) > 0:
             print(f"Saving final trajectory data with {len(trajectory_data)} time points...")
             original_save_file = self.args.save_file
-            original_save_file = f"{original_save_file}_final"
+            self.args.save_file = f"{original_save_file}_final"
             
             self.save_trajectory_data(np.array(trajectory_data), resolution, self.args.training_timestep)
+            self.args.save_file = original_save_file
         
             
             print("Final data saved successfully.")
@@ -899,11 +901,40 @@ class TurbulenceDataGenerator:
             # Collect velocity field after each step
             current_velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
             warmup_trajectory.append(current_velocity.copy())
+            
+            # Memory management: save and clean every 1000 steps during warmup
+            if (step + 1) % 1000 == 0:
+                percentage = ((step + 1) / warmup_steps) * 100
+                print(f"Warmup step {step + 1} of {warmup_steps} ({percentage:.1f}%). ")
+                
+                # Save warmup data if we have enough
+                if len(warmup_trajectory) > 0:
+                    print(f"Saving warmup trajectory data at step {step + 1} with {len(warmup_trajectory)} time points...")
+                    original_save_file = self.args.save_file
+                    self.args.save_file = f"{original_save_file}_warmup_step{step + 1}"
+                    
+                    self.save_trajectory_data(np.array(warmup_trajectory), resolution, self.args.training_timestep)
+                    warmup_trajectory = []  # Clear all warmup data to save memory
+                    self.args.save_file = original_save_file
+                    
+                    # Force garbage collection
+                    gc.collect()
+                    print("Warmup memory cleaned.")
         
-        # Convert to numpy array
+        # Save final warmup data if any remains
+        if len(warmup_trajectory) > 0:
+            print(f"Saving final warmup trajectory data with {len(warmup_trajectory)} time points...")
+            original_save_file = self.args.save_file
+            self.args.save_file = f"{original_save_file}_warmup_final"
+            
+            self.save_trajectory_data(np.array(warmup_trajectory), resolution, self.args.training_timestep)
+            self.args.save_file = original_save_file
+            print("Final warmup data saved successfully.")
+        
+        # Convert to numpy array (will be small or empty now)
         warmup_trajectory = np.array(warmup_trajectory)
         
-        print("warmup_trajectory.shape", warmup_trajectory.shape)
+        print("Final warmup_trajectory.shape", warmup_trajectory.shape)
         return warmup_trajectory
     
 
