@@ -1258,7 +1258,8 @@ class Simulation:
         else:
             vis_dir = None
             if not enable_detailed_visualization:
-                print("详细可视化已禁用")
+                #print("详细可视化已禁用")
+                pass
             elif self.log_dir is None:
                 print("警告: 未设置log_dir，可视化结果将不会保存")
         
