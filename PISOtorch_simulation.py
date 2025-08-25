@@ -1582,7 +1582,7 @@ class Simulation:
         #self.__LOG.info("Adaptive time step %.03e (CFL=%.02f) used %d substeps.", self.time_step, CFL_cond, substep)
         return True
     
-    def run(self, iterations, static=False, log_domain=True):
+    def run(self, iterations, static=False, log_domain=False):
         self._check_domain()
         # time_step: physical time to pass per iteration and substep
         # substeps: how many piso steps to make per iteration
@@ -1598,7 +1598,7 @@ class Simulation:
 
         if self.log_interval>0 and self.log_images and self.log_dir is None:
             raise ValueError("need to specify log/output directory")
-        self.__LOG.info("Starting sim with %d iterations, output in %s.", iterations, self.log_dir or "NONE")
+        #self.__LOG.info("Starting sim with %d iterations, output in %s.", iterations, self.log_dir or "NONE")
         if log_domain:
             self.__LOG.info(str(domain))
             for blockIdx in range(domain.getNumBlocks()):
@@ -1661,7 +1661,7 @@ class Simulation:
                     #LOG.info("It: %d/%d", it, iterations)
                     log = self.log_interval>0 and (it%self.log_interval)==0
                     
-                    self.__LOG.info("It: %d/%d, substeps:%s, timestep:%f", it, iterations, "adaptive" if adaptive_step else substeps, time_step_target)
+                    #self.__LOG.info("It: %d/%d, substeps:%s, timestep:%f", it, iterations, "adaptive" if adaptive_step else substeps, time_step_target)
                     with SAMPLE("simIt"):
                         try:
                             if static:
@@ -1723,7 +1723,7 @@ class Simulation:
         if self.save_domain_name is not None:
             self.save_domain(self.save_domain_name)
         
-        self.__LOG.info("sim finished after %d total steps", self.total_step)
+        #self.__LOG.info("sim finished after %d total steps", self.total_step)
         
         return sim_ok
 
