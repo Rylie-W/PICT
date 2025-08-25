@@ -903,7 +903,7 @@ class TurbulenceDataGenerator:
             warmup_trajectory.append(current_velocity.copy())
             
             # Memory management: save and clean every 1000 steps during warmup
-            if (step + 1) % 1000 == 0:
+            if (step + 1) % 100 == 0:
                 percentage = ((step + 1) / warmup_steps) * 100
                 print(f"Warmup step {step + 1} of {warmup_steps} ({percentage:.1f}%). ")
                 
