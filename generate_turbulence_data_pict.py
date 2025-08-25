@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from pathlib import Path
+import gc
 
 # PICT imports
 import PISOtorch
@@ -743,16 +744,39 @@ class TurbulenceDataGenerator:
         
         # Run simulation and collect data
         for step in range(0, steps, save_interval):
-            if step%1000 == 0:
+            if step%1000 == 0 and step > 0:  # 跳过第0步（数据为空）
                 percentage = (step / steps) * 100
                 print(f"Step {step} of {steps} ({percentage:.1f}%). ")
+                
+                # 保存当前轨迹数据（如果有数据）
+                if len(trajectory_data) > 0:
+                    print(f"Saving trajectory data at step {step} with {len(trajectory_data)} time points...")
+                    # 修改保存文件名包含步数
+                    original_save_file = self.args.save_file
+                    original_save_file = f"{original_save_file}_step{step}"
+                    
+                    self.save_trajectory_data(np.array(trajectory_data), resolution, self.args.training_timestep)
+                    trajectory_data = []
+                    
+                    # 强制垃圾回收
+                    gc.collect()
             sim.run(iterations=save_interval)
             
             # Get current velocity field
             velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
             trajectory_data.append(velocity.copy())
             
-
+        
+        # 保存最后剩余的数据
+        if len(trajectory_data) > 0:
+            print(f"Saving final trajectory data with {len(trajectory_data)} time points...")
+            original_save_file = self.args.save_file
+            original_save_file = f"{original_save_file}_final"
+            
+            self.save_trajectory_data(np.array(trajectory_data), resolution, self.args.training_timestep)
+        
+            
+            print("Final data saved successfully.")
         
         return np.array(trajectory_data)
     
