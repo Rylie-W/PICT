@@ -27,7 +27,7 @@ python generate_turbulence_data_pict.py \
     --low_res 1024 \
     --save_interval 1 \
     --generate_steps 12200 \
-    --warmup_time 0.0 \
+    --warmup_time 4.0 \
     --max_velocity 4.2 \
     --viscosity 1e-3 \
     --peak_wavenumber 2 \
