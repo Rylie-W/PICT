@@ -222,15 +222,15 @@ class TurbulenceDataGenerator:
             data_file = segment_file
         else:
             # Fallback to resolution-based warmup data file if available
-            data_file = warmup_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
+            data_file = warmup_data_dir / f"decaying_turbulence_v2_initial_warmup_{resolution}x{resolution}_index_1.npz"
             if not data_file.exists():
                 return self.load_initial_velocity_from_training_data(resolution)
-        
+        self.logger.info(f"Loading initial velocity from warmup data: {data_file}")
         # Load the data
         data = np.load(data_file)
         u_data = data['u']  # Shape: [time, y, x]
         v_data = data['v']  # Shape: [time, y, x]
-        
+        self.logger.info(f"Loaded initial velocity from warmup data: {u_data.shape}, {v_data.shape}")
         # Extract timestep information from warmup data
         training_timestep = None
         
@@ -395,7 +395,7 @@ class TurbulenceDataGenerator:
     def load_timestep_from_simulation_data(self, resolution):
         """Load timestep from simulation data for the specified resolution"""
         training_data_dir = Path(self.args.training_data_dir)
-        data_file = training_data_dir / f"decaying_turbulence_v2_{resolution}x{resolution}_index_1.npz"
+        data_file = training_data_dir / f"decaying_turbulence_v2_initial_warmup_{resolution}x{resolution}_index_1.npz"
         
         if not data_file.exists():
             # Fallback to computed timestep
