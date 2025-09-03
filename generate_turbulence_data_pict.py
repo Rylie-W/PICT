@@ -731,13 +731,12 @@ class TurbulenceDataGenerator:
     
     def run_simulation(self, sim, domain, resolution, steps, save_interval):
         """Run simulation and collect velocity trajectory data using existing simulation instance"""
-        
-
+        # Check if comparison mode is enabled
+        if getattr(self.args, 'enable_comparison', False):
+            return self.run_simulation_with_comparison(sim, domain, resolution, steps, save_interval)
         
         # Storage for trajectory data
         trajectory_data = []
-        #velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
-        #trajectory_data.append(velocity.copy())
         
         # Run simulation and collect data
         for step in range(0, steps, save_interval):
@@ -958,7 +957,7 @@ class TurbulenceDataGenerator:
                 downsampled = velocity_hr[:, :, ::factor, ::factor, ::factor]
             else:  # 2D: [1, 2, y, x]
                 downsampled = velocity_hr[:, :, ::factor, ::factor]
-            return downsampled.contiguous()
+            return downsampled.contiguous().to(dtype=velocity_hr.dtype)
     
         elif method == 'area_average':
             # Area averaging - reduces high frequency noise
@@ -980,13 +979,17 @@ class TurbulenceDataGenerator:
         """Area averaging downsampling"""
         import torch.nn.functional as F
         
+        # Preserve original dtype
+        original_dtype = velocity.dtype
+        
         # Use average pooling to downsample
         if len(velocity.shape) == 5:  # 3D
             downsampled = F.avg_pool3d(velocity, kernel_size=factor, stride=factor)
         else:  # 2D
             downsampled = F.avg_pool2d(velocity, kernel_size=factor, stride=factor)
         
-        return downsampled
+        # Ensure the output maintains the original dtype
+        return downsampled.to(dtype=original_dtype)
     
     def _spectral_filter_downsample(self, velocity, factor):
         """
@@ -995,11 +998,15 @@ class TurbulenceDataGenerator:
         """
         # Convert to numpy for FFT operations
         if isinstance(velocity, torch.Tensor):
+            original_device = velocity.device
+            original_dtype = velocity.dtype
             velocity_np = velocity.cpu().numpy()
             return_torch = True
         else:
             velocity_np = velocity
             return_torch = False
+            original_device = None
+            original_dtype = None
         
         if len(velocity_np.shape) == 5:  # 3D: [1, 3, z, y, x]
             batch, channels, nz, ny, nx = velocity_np.shape
@@ -1022,7 +1029,7 @@ class TurbulenceDataGenerator:
                     downsampled[b, c, :, :] = self._apply_spectral_filter_2d(field, factor)
         
         if return_torch:
-            return torch.from_numpy(downsampled).to(velocity.device).contiguous()
+            return torch.from_numpy(downsampled).to(device=original_device, dtype=original_dtype).contiguous()
         else:
             return downsampled
     
