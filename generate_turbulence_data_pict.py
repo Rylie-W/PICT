@@ -1159,7 +1159,7 @@ class TurbulenceDataGenerator:
             self.logger.info(f"{'='*60}")
             
             # Downsample initial velocity to target resolution
-            if resolution == self.args.high_res:
+            if resolution == self.args.warmup_res:
                 # Use original high-resolution initial velocity
                 initial_velocity = hr_initial_velocity
                 self.logger.info(f"Using original high-resolution initial velocity")
@@ -1167,9 +1167,9 @@ class TurbulenceDataGenerator:
                 # Downsample from high-resolution
                 downsample_method = getattr(self.args, 'downsample_method', 'spectral_filter')
                 initial_velocity = self.downsample_velocity(
-                    hr_initial_velocity, resolution, self.args.high_res, method=downsample_method
+                    hr_initial_velocity, resolution, self.args.warmup_res, method=downsample_method
                 )
-                self.logger.info(f"Downsampled initial velocity from {self.args.high_res}x{self.args.high_res} to {resolution}x{resolution} using {downsample_method}")
+                self.logger.info(f"Downsampled initial velocity from {self.args.warmup_res}x{self.args.high_res} to {resolution}x{resolution} using {downsample_method}")
                 
                 # Verify downsampling quality
                 energy_ratio = self.verify_downsampling_quality(hr_initial_velocity, initial_velocity, downsample_method)
@@ -1230,7 +1230,7 @@ class TurbulenceDataGenerator:
         
         if use_warmup_data_init:
             # Try to load initial velocity from warmup data
-            initial_velocity, hr_training_timestep = self.load_initial_velocity_from_warmup_data(self.args.high_res)
+            initial_velocity, hr_training_timestep = self.load_initial_velocity_from_warmup_data(self.args.warmup_res)
             
             if initial_velocity is not None:
                 self.logger.info(f"Successfully loaded initial velocity from warmup data")
@@ -1598,6 +1598,7 @@ def main():
                        help='Manually specify timestep for training data generation (overrides auto-calculation)')
     
     # Resolution parameters
+    parser.add_argument('--warmup_res', type=int, default=2048)
     parser.add_argument('--low_res', type=int, default=64)
 
     parser.add_argument('--high_res', type=int, default=128,  # Reduced from 2048 for PICT
