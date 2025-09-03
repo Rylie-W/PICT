@@ -731,9 +731,6 @@ class TurbulenceDataGenerator:
     
     def run_simulation(self, sim, domain, resolution, steps, save_interval):
         """Run simulation and collect velocity trajectory data using existing simulation instance"""
-        # Check if comparison mode is enabled
-        if getattr(self.args, 'enable_comparison', False):
-            return self.run_simulation_with_comparison(sim, domain, resolution, steps, save_interval)
         
 
         
@@ -939,26 +936,287 @@ class TurbulenceDataGenerator:
     
 
     
-    def downsample_velocity(self, velocity_hr, target_resolution, source_resolution):
-        """Downsample high-resolution velocity to target resolution"""
-        # Simple downsampling by taking every nth point
+    def downsample_velocity(self, velocity_hr, target_resolution, source_resolution, method='spectral_filter'):
+        """
+        Downsample high-resolution velocity to target resolution using physics-informed methods
+        
+        Args:
+            velocity_hr: High-resolution velocity field [batch, channels, y, x]
+            target_resolution: Target grid resolution
+            source_resolution: Source grid resolution  
+            method: Downsampling method
+                - 'simple': Simple subsampling (fast but may cause aliasing)
+                - 'area_average': Local area averaging (good for smooth fields)
+                - 'spectral_filter': Spectral filtering (best for turbulence, removes aliasing)
+                - 'conservative': Conservative area averaging (preserves mass/momentum)
+        """
         factor = source_resolution // target_resolution
         
-        if len(velocity_hr.shape) == 5:  # 3D: [1, 3, z, y, x]
-            downsampled = velocity_hr[:, :, ::factor, ::factor, ::factor]
-        else:  # 2D: [1, 2, y, x]
-            downsampled = velocity_hr[:, :, ::factor, ::factor]
+        if method == 'simple':
+            # Original simple subsampling
+            if len(velocity_hr.shape) == 5:  # 3D: [1, 3, z, y, x]
+                downsampled = velocity_hr[:, :, ::factor, ::factor, ::factor]
+            else:  # 2D: [1, 2, y, x]
+                downsampled = velocity_hr[:, :, ::factor, ::factor]
+            return downsampled.contiguous()
+    
+        elif method == 'area_average':
+            # Area averaging - reduces high frequency noise
+            return self._area_average_downsample(velocity_hr, factor)
+            
+        elif method == 'spectral_filter':
+            # Spectral filtering - best for turbulence (removes aliasing)
+            return self._spectral_filter_downsample(velocity_hr, factor)
+            
+        elif method == 'conservative':
+            # Conservative averaging - preserves physical quantities
+            return self._conservative_downsample(velocity_hr, factor)
+            
+        else:
+            self.logger.warning(f"Unknown downsampling method: {method}, using simple")
+            return self.downsample_velocity(velocity_hr, target_resolution, source_resolution, 'simple')
+    
+    def _area_average_downsample(self, velocity, factor):
+        """Area averaging downsampling"""
+        import torch.nn.functional as F
         
-        # Make tensor contiguous in memory
-        return downsampled.contiguous()
+        # Use average pooling to downsample
+        if len(velocity.shape) == 5:  # 3D
+            downsampled = F.avg_pool3d(velocity, kernel_size=factor, stride=factor)
+        else:  # 2D
+            downsampled = F.avg_pool2d(velocity, kernel_size=factor, stride=factor)
+        
+        return downsampled
+    
+    def _spectral_filter_downsample(self, velocity, factor):
+        """
+        Spectral filtering downsampling - removes high frequencies before downsampling
+        This is the gold standard for turbulence downsampling
+        """
+        # Convert to numpy for FFT operations
+        if isinstance(velocity, torch.Tensor):
+            velocity_np = velocity.cpu().numpy()
+            return_torch = True
+        else:
+            velocity_np = velocity
+            return_torch = False
+        
+        if len(velocity_np.shape) == 5:  # 3D: [1, 3, z, y, x]
+            batch, channels, nz, ny, nx = velocity_np.shape
+            downsampled = np.zeros((batch, channels, nz//factor, ny//factor, nx//factor))
+            
+            for b in range(batch):
+                for c in range(channels):
+                    # Apply 3D spectral filter
+                    field = velocity_np[b, c, :, :, :]
+                    downsampled[b, c, :, :, :] = self._apply_spectral_filter_3d(field, factor)
+                    
+        else:  # 2D: [1, 2, y, x]
+            batch, channels, ny, nx = velocity_np.shape
+            downsampled = np.zeros((batch, channels, ny//factor, nx//factor))
+            
+            for b in range(batch):
+                for c in range(channels):
+                    # Apply 2D spectral filter
+                    field = velocity_np[b, c, :, :]
+                    downsampled[b, c, :, :] = self._apply_spectral_filter_2d(field, factor)
+        
+        if return_torch:
+            return torch.from_numpy(downsampled).to(velocity.device).contiguous()
+        else:
+            return downsampled
+    
+    def _apply_spectral_filter_2d(self, field, factor):
+        """Apply 2D spectral filtering with anti-aliasing"""
+        ny, nx = field.shape
+        
+        # FFT to frequency domain
+        field_fft = np.fft.fft2(field)
+        field_fft_shifted = np.fft.fftshift(field_fft)
+        
+        # Create low-pass filter to prevent aliasing
+        # Nyquist frequency for target resolution
+        nyquist_target_y = (ny // factor) // 2
+        nyquist_target_x = (nx // factor) // 2
+        
+        # Create filter mask
+        ky = np.fft.fftfreq(ny, 1.0) * ny
+        kx = np.fft.fftfreq(nx, 1.0) * nx
+        KY, KX = np.meshgrid(ky, kx, indexing='ij')
+        
+        # Low-pass filter: keep only frequencies that can be represented at target resolution
+        filter_mask = (np.abs(KY) <= nyquist_target_y) & (np.abs(KX) <= nyquist_target_x)
+        
+        # Apply filter
+        filtered_fft = field_fft * filter_mask
+        
+        # IFFT back to physical space
+        filtered_field = np.fft.ifft2(filtered_fft).real
+        
+        # Subsample
+        return filtered_field[::factor, ::factor]
+    
+    def _apply_spectral_filter_3d(self, field, factor):
+        """Apply 3D spectral filtering with anti-aliasing"""
+        nz, ny, nx = field.shape
+        
+        # FFT to frequency domain
+        field_fft = np.fft.fftn(field)
+        
+        # Create low-pass filter
+        nyquist_target_z = (nz // factor) // 2
+        nyquist_target_y = (ny // factor) // 2
+        nyquist_target_x = (nx // factor) // 2
+        
+        kz = np.fft.fftfreq(nz, 1.0) * nz
+        ky = np.fft.fftfreq(ny, 1.0) * ny
+        kx = np.fft.fftfreq(nx, 1.0) * nx
+        KZ, KY, KX = np.meshgrid(kz, ky, kx, indexing='ij')
+        
+        filter_mask = (np.abs(KZ) <= nyquist_target_z) & \
+                     (np.abs(KY) <= nyquist_target_y) & \
+                     (np.abs(KX) <= nyquist_target_x)
+        
+        # Apply filter
+        filtered_fft = field_fft * filter_mask
+        
+        # IFFT back to physical space
+        filtered_field = np.fft.ifftn(filtered_fft).real
+        
+        # Subsample
+        return filtered_field[::factor, ::factor, ::factor]
+    
+    def _conservative_downsample(self, velocity, factor):
+        """
+        Conservative downsampling that preserves momentum and mass
+        Uses volume-weighted averaging
+        """
+        return self._area_average_downsample(velocity, factor)
+    
+    def verify_downsampling_quality(self, velocity_hr, velocity_lr, method_name):
+        """Verify the quality of downsampling by checking physical properties"""
+        self.logger.info(f"Verifying downsampling quality for method: {method_name}")
+        
+        # Convert to numpy if needed
+        if isinstance(velocity_hr, torch.Tensor):
+            vel_hr = velocity_hr.cpu().numpy()
+            vel_lr = velocity_lr.cpu().numpy()
+        else:
+            vel_hr = velocity_hr
+            vel_lr = velocity_lr
+        
+        # Check energy preservation (should be lower but not drastically different)
+        if len(vel_hr.shape) == 4:  # 2D
+            energy_hr = np.mean(vel_hr[0, 0, :, :]**2 + vel_hr[0, 1, :, :]**2)
+            energy_lr = np.mean(vel_lr[0, 0, :, :]**2 + vel_lr[0, 1, :, :]**2)
+        
+        energy_ratio = energy_lr / energy_hr
+        self.logger.info(f"Energy ratio (LR/HR): {energy_ratio:.4f}")
+        
+        # Check velocity magnitude statistics
+        if len(vel_hr.shape) == 4:  # 2D
+            vel_mag_hr = np.sqrt(vel_hr[0, 0, :, :]**2 + vel_hr[0, 1, :, :]**2)
+            vel_mag_lr = np.sqrt(vel_lr[0, 0, :, :]**2 + vel_lr[0, 1, :, :]**2)
+            
+            self.logger.info(f"HR velocity - Mean: {np.mean(vel_mag_hr):.4f}, Std: {np.std(vel_mag_hr):.4f}")
+            self.logger.info(f"LR velocity - Mean: {np.mean(vel_mag_lr):.4f}, Std: {np.std(vel_mag_lr):.4f}")
+        
+        return energy_ratio
     
     def generate_data(self):
-        """Main data generation pipeline"""
+        """Main data generation pipeline with multi-resolution independent simulations"""
         
         # Check if we should use warmup data or training data for initialization
         use_warmup_data_init = getattr(self.args, 'use_warmup_data_init', False)
         use_training_data_init = getattr(self.args, 'use_training_data_init', False)
         
+        # Step 1: Get or generate high-resolution initial velocity field
+        hr_initial_velocity, hr_training_timestep = self._get_hr_initial_velocity(
+            use_warmup_data_init, use_training_data_init
+        )
+        
+        # Step 2: Get all resolutions to generate
+        resolution_list = []
+        res = self.args.low_res
+        while res <= self.args.high_res:
+            resolution_list.append(res)
+            res *= 2
+        
+        self.logger.info(f"Generating data for resolutions: {resolution_list}")
+        self.logger.info(f"Using downsample method: {getattr(self.args, 'downsample_method', 'spectral_filter')}")
+        
+        # Step 3: For each resolution, downsample initial conditions and run independent simulation
+        for resolution in resolution_list:
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"STARTING SIMULATION FOR RESOLUTION {resolution}x{resolution}")
+            self.logger.info(f"{'='*60}")
+            
+            # Downsample initial velocity to target resolution
+            if resolution == self.args.high_res:
+                # Use original high-resolution initial velocity
+                initial_velocity = hr_initial_velocity
+                self.logger.info(f"Using original high-resolution initial velocity")
+            else:
+                # Downsample from high-resolution
+                downsample_method = getattr(self.args, 'downsample_method', 'spectral_filter')
+                initial_velocity = self.downsample_velocity(
+                    hr_initial_velocity, resolution, self.args.high_res, method=downsample_method
+                )
+                self.logger.info(f"Downsampled initial velocity from {self.args.high_res}x{self.args.high_res} to {resolution}x{resolution} using {downsample_method}")
+                
+                # Verify downsampling quality
+                energy_ratio = self.verify_downsampling_quality(hr_initial_velocity, initial_velocity, downsample_method)
+                self.logger.info(f"Energy preservation ratio: {energy_ratio:.4f}")
+            
+            # Create domain for this resolution
+            domain, block = self.create_domain(resolution)
+            
+            # Set initial velocity
+            block.setVelocity(initial_velocity)
+            domain.PrepareSolve()
+            domain.UpdateDomainData()
+            
+            # Calculate timesteps for this resolution
+            timestep_info = self._calculate_simulation_timesteps(resolution, hr_training_timestep, initial_velocity)
+            warmup_timestep, training_timestep, warmup_steps = timestep_info
+            
+            # Create simulation instance for this resolution
+            sim = self.create_simulation(
+                domain, 
+                warmup_timestep, 
+                max(warmup_steps // 10, 1), 
+                f"resolution_{resolution}_logs"
+            )
+            
+            # Run warmup simulation
+            self.logger.info(f"Running warmup simulation for {warmup_steps} steps with timestep {warmup_timestep:.2e}")
+            warmup_trajectory = self.warmup_simulation(sim, resolution, warmup_steps)
+            
+            # Save warmup trajectory data
+            self.save_warmup_trajectory_data(warmup_trajectory, resolution, warmup_timestep)
+            
+            # Run main simulation
+            self.logger.info(f"Running main simulation for {self.args.generate_steps} steps")
+            self.run_simulation(
+                sim, domain, resolution, self.args.generate_steps, 
+                save_interval=self.args.save_interval
+            )
+            
+            self.logger.info(f"COMPLETED SIMULATION FOR RESOLUTION {resolution}x{resolution}")
+            
+            # Clean up GPU memory before next resolution
+            del domain, block, sim, initial_velocity, trajectory
+            if resolution != self.args.high_res:
+                del warmup_trajectory  # Only delete if we're not using it for next resolution
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("ALL MULTI-RESOLUTION SIMULATIONS COMPLETED!")
+        self.logger.info(f"{'='*60}")
+
+    def _get_hr_initial_velocity(self, use_warmup_data_init, use_training_data_init):
+        """Get or generate high-resolution initial velocity field"""
         # Create high-resolution domain for initial conditions
         hr_domain, hr_block = self.create_domain(self.args.high_res)
         hr_training_timestep = None
@@ -968,133 +1226,59 @@ class TurbulenceDataGenerator:
             initial_velocity, hr_training_timestep = self.load_initial_velocity_from_warmup_data(self.args.high_res)
             
             if initial_velocity is not None:
-                # Set the loaded velocity field
-                hr_block.setVelocity(initial_velocity)
-                hr_domain.PrepareSolve()
-                hr_domain.UpdateDomainData()
+                self.logger.info(f"Successfully loaded initial velocity from warmup data")
+                return initial_velocity, hr_training_timestep
             else:
-                # Fallback to generated initial conditions
-                initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
-                hr_domain.PrepareSolve()
+                self.logger.warning("Failed to load warmup data, falling back to generated initial conditions")
                 
         elif use_training_data_init:
             # Try to load initial velocity from training data
-            initial_velocity_training, hr_training_timestep = self.load_initial_velocity_from_training_data(self.args.high_res)
+            initial_velocity, hr_training_timestep = self.load_initial_velocity_from_training_data(self.args.high_res)
             
-            if initial_velocity_training is not None:
-                # Set the loaded velocity field
-                initial_velocity = initial_velocity_training
-                hr_block.setVelocity(initial_velocity)
-                hr_domain.PrepareSolve()
-                hr_domain.UpdateDomainData()
+            if initial_velocity is not None:
+                self.logger.info(f"Successfully loaded initial velocity from training data")
+                return initial_velocity, hr_training_timestep
             else:
-                # Fallback to generated initial conditions
-                initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
-                hr_domain.PrepareSolve()
-                
-        else:
-            # Original approach: generate initial turbulent field
-            initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
-            hr_domain.PrepareSolve()
-            
-        # Calculate warmup parameters
-        if hasattr(self.args, 'warmup_timestep') and self.args.warmup_timestep is not None:
-            # Use manually specified warmup timestep
-            output_time_step = self.args.warmup_timestep
-        elif hr_training_timestep is not None:
-            output_time_step = hr_training_timestep
-        else:
-            # Use computed CFD timestep for warmup
-            output_time_step = self.compute_cfd_timestep(self.args.high_res)
-            
-        warmup_steps = round(self.args.warmup_time / output_time_step)
+                self.logger.warning("Failed to load training data, falling back to generated initial conditions")
         
-        # Create simulation instance for high-resolution domain
-        hr_sim = self.create_simulation(
-            hr_domain, 
-            output_time_step, 
-            max(warmup_steps // 10, 1), 
-            "warmup_logs"
-        )
+        # Generate initial turbulent field
+        self.logger.info("Generating new initial turbulent velocity field")
+        hr_block = hr_domain.getBlock(0)  # Get the block correctly
+        initial_velocity = self.generate_initial_turbulence(hr_domain, hr_block)
+        hr_domain.PrepareSolve()
         
-        # Run warmup using the simulation instance and collect trajectory
-        warmup_trajectory = self.warmup_simulation(hr_sim, self.args.high_res, warmup_steps)
-        
-        # Save warmup trajectory data
-        self.save_warmup_trajectory_data(warmup_trajectory, self.args.high_res, output_time_step)
-        
-        # Get resolutions to generate
-        resolution_list = []
-        res = self.args.low_res
-        while res <= self.args.high_res:
-            resolution_list.append(res)
-            res *= 2
-        
-        # CRITICAL: For pressure continuity, we can only use the high-resolution domain
-        # Different resolutions would require different domains, which breaks pressure continuity
-        # So we only generate data for the high-resolution
-        resolution = self.args.high_res
-        
-        domain = hr_domain
-        current_training_timestep = hr_training_timestep
-        
-        # Load timestep for this resolution when using warmup data init
-        if use_warmup_data_init:
-            # Load timestep from simulation data for this resolution
-            simulation_timestep = self.load_timestep_from_simulation_data(resolution)
-            if simulation_timestep is not None:
-                current_training_timestep = simulation_timestep
-        
-        # Determine final training timestep with manual override priority
-        if hasattr(self.args, 'training_timestep') and self.args.training_timestep is not None:
-            # Use manually specified training timestep (highest priority)
-            final_training_timestep = self.args.training_timestep
-        elif current_training_timestep is not None:
-            # Use timestep from training data or simulation data
-            final_training_timestep = current_training_timestep
-        elif hr_training_timestep is not None:
-            # Fallback to hr_training_timestep
-            final_training_timestep = hr_training_timestep
-        else:
-            # Last resort: compute CFD timestep
-            final_training_timestep = self.compute_cfd_timestep(resolution)
-        
-        # CRITICAL: Use the same simulator instance to preserve ALL pressure info
-        sim = hr_sim  # Always use the same simulation instance with same domain
-        
-        trajectory = self.run_simulation(
-            sim, domain, resolution, self.args.generate_steps, 
-            save_interval=self.args.save_interval
-        )
-        
-        self.save_trajectory_data(trajectory, resolution, final_training_timestep)
-        
-        # If user wants multiple resolutions, we need to downsample the trajectory data
-        # This preserves pressure continuity while providing multiple resolution outputs
-        if self.args.low_res < self.args.high_res:
-            self._generate_downsampled_resolutions(trajectory, final_training_timestep)
+        return initial_velocity, hr_training_timestep
     
-    def _generate_downsampled_resolutions(self, trajectory, timestep):
-        """Generate lower resolution data by downsampling the high-resolution trajectory"""
-        resolution_list = []
-        res = self.args.low_res
-        while res < self.args.high_res:  # Only lower resolutions
-            resolution_list.append(res)
-            res *= 2
+    def _calculate_simulation_timesteps(self, resolution, hr_training_timestep, velocity_field):
+        """Calculate appropriate timesteps for warmup and training phases"""
         
-        for target_resolution in resolution_list:
-            # Downsample each frame in the trajectory
-            downsampled_trajectory = []
-            for frame in trajectory:
-                downsampled_frame = self.downsample_velocity(
-                    torch.from_numpy(frame), target_resolution, self.args.high_res
-                ).numpy()
-                downsampled_trajectory.append(downsampled_frame)
-            
-            downsampled_trajectory = np.array(downsampled_trajectory)
-            
-            # Save the downsampled trajectory
-            self.save_trajectory_data(downsampled_trajectory, target_resolution, timestep)
+        # Warmup timestep calculation
+        if hasattr(self.args, 'warmup_timestep') and self.args.warmup_timestep is not None:
+            warmup_timestep = self.args.warmup_timestep
+            self.logger.info(f"Using manually specified warmup timestep: {warmup_timestep:.2e}")
+        elif hr_training_timestep is not None:
+            warmup_timestep = hr_training_timestep
+            self.logger.info(f"Using timestep from loaded data: {warmup_timestep:.2e}")
+        else:
+            warmup_timestep = self.compute_cfd_timestep(resolution, velocity_field)
+            self.logger.info(f"Computed warmup timestep from CFD criteria: {warmup_timestep:.2e}")
+        
+        # Training timestep calculation
+        if hasattr(self.args, 'training_timestep') and self.args.training_timestep is not None:
+            training_timestep = self.args.training_timestep
+            self.logger.info(f"Using manually specified training timestep: {training_timestep:.2e}")
+        elif hr_training_timestep is not None:
+            training_timestep = hr_training_timestep
+            self.logger.info(f"Using training timestep from loaded data: {training_timestep:.2e}")
+        else:
+            training_timestep = self.compute_cfd_timestep(resolution, velocity_field)
+            self.logger.info(f"Computed training timestep from CFD criteria: {training_timestep:.2e}")
+        
+        # Calculate warmup steps
+        warmup_steps = round(self.args.warmup_time / warmup_timestep)
+        self.logger.info(f"Warmup steps: {warmup_steps} (warmup_time={self.args.warmup_time}s)")
+        
+        return warmup_timestep, training_timestep, warmup_steps
 
     def save_trajectory_data(self, trajectory, resolution, timestep=None):
         """Save trajectory data in numpy format"""
@@ -1411,6 +1595,13 @@ def main():
 
     parser.add_argument('--high_res', type=int, default=128,  # Reduced from 2048 for PICT
                        help='Highest resolution (limited by GPU memory)')
+    parser.add_argument('--downsample_method', type=str, default='spectral_filter',
+                       choices=['simple', 'area_average', 'spectral_filter', 'conservative'],
+                       help='Method for downsampling high-resolution velocity to lower resolutions:\n'
+                            '  simple: Direct subsampling (fast, may alias)\n'
+                            '  area_average: Local averaging (good for smooth fields)\n'
+                            '  spectral_filter: Anti-aliasing filter (best for turbulence)\n'
+                            '  conservative: Mass/momentum conserving (physics-accurate)')
     
     # Output parameters
     parser.add_argument('--save_dir', type=str, default='./data/pict_turbulence')
