@@ -142,21 +142,75 @@ def calculate_vorticity(u, v):
     vorticity = dvdx - dudy
     return vorticity
 
-def create_single_frame(u, v, step, visualization_type='velocity_magnitude'):
-    """创建单帧图像"""
+def calculate_global_color_range(frame_list, visualization_type):
+    """预扫描所有数据计算全局色彩范围"""
+    logger.info(f"预扫描数据计算全局{visualization_type}范围...")
+    
+    all_values = []
+    
+    for i, (global_step, file_path, time_idx) in enumerate(tqdm(frame_list, desc="扫描数据范围")):
+        u, v = load_velocity_field(file_path, time_idx)
+        
+        if u is None or v is None:
+            continue
+            
+        if visualization_type == 'velocity_magnitude':
+            field = calculate_velocity_magnitude(u, v)
+        elif visualization_type == 'vorticity':
+            field = calculate_vorticity(u, v)
+        else:
+            raise ValueError(f"Unknown visualization type: {visualization_type}")
+        
+        all_values.extend(field.flatten())
+        
+        # 每处理50帧输出一次进度信息
+        if (i + 1) % 50 == 0:
+            logger.info(f"已扫描 {i+1}/{len(frame_list)} 帧")
+    
+    if not all_values:
+        logger.error("没有有效的数据用于计算色彩范围")
+        return None, None
+    
+    all_values = np.array(all_values)
+    
+    if visualization_type == 'velocity_magnitude':
+        vmin = 0  # 速度幅值始终从0开始
+        vmax = np.max(all_values)
+        logger.info(f"全局速度幅值范围: [{vmin:.4f}, {vmax:.4f}]")
+    elif visualization_type == 'vorticity':
+        abs_max = np.max(np.abs(all_values))
+        vmin = -abs_max
+        vmax = abs_max
+        logger.info(f"全局涡度范围: [{vmin:.4f}, {vmax:.4f}]")
+    
+    return vmin, vmax
+
+def create_single_frame(u, v, step, visualization_type='velocity_magnitude', vmin=None, vmax=None):
+    """创建单帧图像
+    
+    Args:
+        u, v: 速度分量
+        step: 时间步
+        visualization_type: 可视化类型
+        vmin, vmax: 色彩范围，如果提供则使用全局统一范围
+    """
     fig, ax = plt.subplots(1, 1, figsize=(10, 10))
     
     if visualization_type == 'velocity_magnitude':
         field = calculate_velocity_magnitude(u, v)
         title = f'Velocity Magnitude - Step {step}'
         cmap = 'viridis'
-        vmin, vmax = 0, None
+        # 如果没有提供全局范围，则使用局部范围
+        if vmin is None or vmax is None:
+            vmin, vmax = 0, None
     elif visualization_type == 'vorticity':
         field = calculate_vorticity(u, v)
         title = f'Vorticity - Step {step}'
         cmap = 'RdBu_r'
-        vmax = np.abs(field).max()
-        vmin = -vmax
+        # 如果没有提供全局范围，则使用局部范围
+        if vmin is None or vmax is None:
+            field_max = np.abs(field).max()
+            vmin, vmax = -field_max, field_max
     else:
         raise ValueError(f"Unknown visualization type: {visualization_type}")
     
@@ -200,7 +254,7 @@ def setup_ffmpeg():
 def create_turbulence_video(base_path, start_step, end_step, time_interval, 
                           output_file='turbulence_evolution.mp4', 
                           visualization_type='velocity_magnitude',
-                          fps=10):
+                          fps=10, vmin=None, vmax=None):
     """创建湍流演化视频
     
     Args:
@@ -211,6 +265,8 @@ def create_turbulence_video(base_path, start_step, end_step, time_interval,
         output_file: 输出视频文件名
         visualization_type: 可视化类型
         fps: 视频帧率
+        vmin: 色彩尺度最小值 (如果指定则跳过自动计算)
+        vmax: 色彩尺度最大值 (如果指定则跳过自动计算)
     """
     
     # 设置ffmpeg
@@ -238,6 +294,18 @@ def create_turbulence_video(base_path, start_step, end_step, time_interval,
     if first_data is None:
         return
     
+    # 确定色彩范围
+    if vmin is not None and vmax is not None:
+        # 使用用户指定的色彩范围
+        global_vmin, global_vmax = vmin, vmax
+        logger.info(f"使用用户指定的色彩范围: [{global_vmin:.4f}, {global_vmax:.4f}]")
+    else:
+        # 预扫描所有数据计算全局色彩范围
+        global_vmin, global_vmax = calculate_global_color_range(frame_list, visualization_type)
+        if global_vmin is None or global_vmax is None:
+            logger.error("无法计算全局色彩范围")
+            return
+    
     logger.info(f"使用ffmpeg生成MP4视频")
     
     # 确保输出文件是MP4格式
@@ -257,8 +325,9 @@ def create_turbulence_video(base_path, start_step, end_step, time_interval,
         if u is None or v is None:
             continue
             
-        # 创建单帧图像
-        fig = create_single_frame(u, v, global_step, visualization_type)
+        # 创建单帧图像，使用全局色彩范围
+        fig = create_single_frame(u, v, global_step, visualization_type, 
+                                 vmin=global_vmin, vmax=global_vmax)
         
         # 保存帧
         frame_file = temp_dir / f"frame_{i:05d}.png"
@@ -336,10 +405,18 @@ def main():
                        help='可视化类型')
     parser.add_argument('--fps', type=int, default=10,
                        help='视频帧率')
+    parser.add_argument('--vmin', type=float, default=-3.0,
+                       help='色彩尺度最小值 (如果指定vmin和vmax，将跳过自动计算)')
+    parser.add_argument('--vmax', type=float, default=3.0,
+                       help='色彩尺度最大值 (如果指定vmin和vmax，将跳过自动计算)')
     parser.add_argument('--check_format', action='store_true',
                        help='仅检查第一个文件的数据格式')
     
     args = parser.parse_args()
+    
+    # 验证vmin和vmax参数
+    if (args.vmin is not None) != (args.vmax is not None):
+        parser.error("如果指定色彩范围，必须同时提供 --vmin 和 --vmax 参数")
     
     if args.check_format:
         # 仅检查格式
@@ -354,7 +431,9 @@ def main():
             time_interval=args.time_interval,
             output_file=args.output_file,
             visualization_type=args.visualization_type,
-            fps=args.fps
+            fps=args.fps,
+            vmin=args.vmin,
+            vmax=args.vmax
         )
 
 if __name__ == '__main__':
