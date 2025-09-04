@@ -1212,7 +1212,7 @@ class TurbulenceDataGenerator:
             self.logger.info(f"COMPLETED SIMULATION FOR RESOLUTION {resolution}x{resolution}")
             
             # Clean up GPU memory before next resolution
-            del domain, block, sim, initial_velocity, trajectory
+            del domain, block, sim, initial_velocity
             if resolution != self.args.high_res:
                 del warmup_trajectory  # Only delete if we're not using it for next resolution
             torch.cuda.empty_cache()
@@ -1603,7 +1603,7 @@ def main():
 
     parser.add_argument('--high_res', type=int, default=128,  # Reduced from 2048 for PICT
                        help='Highest resolution (limited by GPU memory)')
-    parser.add_argument('--downsample_method', type=str, default='spectral_filter',
+    parser.add_argument('--downsample_method', type=str, default='area_average',
                        choices=['simple', 'area_average', 'spectral_filter', 'conservative'],
                        help='Method for downsampling high-resolution velocity to lower resolutions:\n'
                             '  simple: Direct subsampling (fast, may alias)\n'
