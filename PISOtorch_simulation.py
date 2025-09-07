@@ -7,6 +7,10 @@ import PISOtorch_diff
 #import PISOtorch_diff_old as PISOtorch_diff
 import numpy as np
 
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.gridspec import GridSpec
+
 assert torch.cuda.is_available()
 cuda_device = torch.device("cuda")
 cpu_device = torch.device("cpu")
@@ -358,7 +362,7 @@ class Simulation:
     __NON_ORTHO_MODE = NON_ORTHO_CENTER_MATRIX | NON_ORTHO_DIRECT_MATRIX | NON_ORTHO_DIAGONAL_RHS # Bit flags
     
     def __init__(self, domain:PISOtorch.Domain=None, *, time_step:float=1.0, substeps:int=1, corrector_steps:int=2, density_viscosity:float=None,
-           adaptive_CFL=0.8,
+           adaptive_CFL=0.8, visualize_max_steps:int=None,
            prep_fn=None, advection_use_BiCG:bool=True, pressure_use_BiCG:bool=False, scipy_solve_advection:bool=False, scipy_solve_pressure:bool=False,
            preconditionBiCG:bool=False, BiCG_precondition_fallback:bool=True, 
            advection_tol:float=None, pressure_tol:float=None, convergence_tol:float=None, solver_double_fallback:bool=False,
@@ -385,6 +389,7 @@ class Simulation:
         self.corrector_steps = corrector_steps
         self.convergence_tol = convergence_tol
         self.adaptive_CFL = adaptive_CFL
+        self.visualize_max_steps = visualize_max_steps
         
         self.scipy_solve_advection = scipy_solve_advection
         self.advection_use_BiCG = advection_use_BiCG
@@ -561,6 +566,17 @@ class Simulation:
         if not isinstance(adaptive_CFL, numbers.Real): raise TypeError("adaptive_CFL must be float.")
         if not adaptive_CFL>0: raise ValueError("adaptive_CFL must be positive.")
         self.__adaptive_CFL = adaptive_CFL
+    
+    @property
+    def visualize_max_steps(self):
+        return self.__visualize_max_steps
+    @visualize_max_steps.setter
+    def visualize_max_steps(self, visualize_max_steps):
+        if not (visualize_max_steps is None or isinstance(visualize_max_steps, numbers.Integral)):
+            raise TypeError("visualize_max_steps must be int or None.")
+        if visualize_max_steps is not None and visualize_max_steps<0:
+            raise ValueError("visualize_max_steps must be non-negative if set.")
+        self.__visualize_max_steps = visualize_max_steps
     
     @property
     def corrector_steps(self):
@@ -983,10 +999,277 @@ class Simulation:
         
         domain = self.domain
         non_ortho_flags = self.__non_ortho_flags
+
+        # 添加增强的可视化函数
+        def visualize_velocity(vel_tensor, stage, save_dir=None, step_info=None):
+            try:
+                # 将velocity tensor转换为numpy数组并处理NaN值
+                vel = vel_tensor.detach().cpu().numpy()
+                vel = np.nan_to_num(vel, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # 提取u和v分量
+                u = vel[0, 0]  # First channel (x-direction)
+                v = vel[0, 1]  # Second channel (y-direction)
+                
+                # 计算速度大小和涡度
+                magnitude = np.sqrt(u**2 + v**2)
+                
+                # 计算涡度 (vorticity) - 如果网格足够大的话
+                if u.shape[0] > 2 and u.shape[1] > 2:
+                    # 使用有限差分计算涡度
+                    du_dy = np.gradient(u, axis=0)
+                    dv_dx = np.gradient(v, axis=1)
+                    vorticity = dv_dx - du_dy
+                else:
+                    vorticity = np.zeros_like(u)
+                
+                # 创建网格点
+                y, x = np.mgrid[0:u.shape[0], 0:u.shape[1]]
+                
+                # 创建更大的图形，包含4个子图
+                fig = plt.figure(figsize=(20, 10))
+                gs = GridSpec(2, 2, figure=fig)
+                
+                # 速度大小的热图
+                ax1 = fig.add_subplot(gs[0, 0])
+                if np.max(magnitude) > 0:
+                    im1 = ax1.imshow(magnitude, cmap='viridis', origin='lower')
+                    plt.colorbar(im1, ax=ax1, label='Magnitude')
+                else:
+                    im1 = ax1.imshow(magnitude, cmap='viridis', origin='lower')
+                    plt.colorbar(im1, ax=ax1, label='Magnitude')
+                ax1.set_title(f'Velocity Magnitude\nMax: {np.max(magnitude):.6f}')
+                ax1.set_xlabel('X')
+                ax1.set_ylabel('Y')
+                
+                # u分量的热图
+                ax2 = fig.add_subplot(gs[0, 1])
+                u_max = max(np.max(np.abs(u)), 1e-10)  # 避免除零
+                im2 = ax2.imshow(u, cmap='RdBu', vmin=-u_max, vmax=u_max, origin='lower')
+                plt.colorbar(im2, ax=ax2, label='U velocity')
+                ax2.set_title(f'U Component\nRange: [{np.min(u):.6f}, {np.max(u):.6f}]')
+                ax2.set_xlabel('X')
+                ax2.set_ylabel('Y')
+                
+                # v分量的热图
+                ax3 = fig.add_subplot(gs[1, 0])
+                v_max = max(np.max(np.abs(v)), 1e-10)  # 避免除零
+                im3 = ax3.imshow(v, cmap='RdBu', vmin=-v_max, vmax=v_max, origin='lower')
+                plt.colorbar(im3, ax=ax3, label='V velocity')
+                ax3.set_title(f'V Component\nRange: [{np.min(v):.6f}, {np.max(v):.6f}]')
+                ax3.set_xlabel('X')
+                ax3.set_ylabel('Y')
+                
+                # 涡度图
+                ax4 = fig.add_subplot(gs[1, 1])
+                if np.max(np.abs(vorticity)) > 0:
+                    vort_max = np.max(np.abs(vorticity))
+                    im4 = ax4.imshow(vorticity, cmap='RdBu', vmin=-vort_max, vmax=vort_max, origin='lower')
+                else:
+                    im4 = ax4.imshow(vorticity, cmap='RdBu', origin='lower')
+                plt.colorbar(im4, ax=ax4, label='Vorticity')
+                ax4.set_title(f'Vorticity\nRange: [{np.min(vorticity):.6f}, {np.max(vorticity):.6f}]')
+                ax4.set_xlabel('X')
+                ax4.set_ylabel('Y')
+                
+                # 在速度大小图上添加矢量场（稀疏采样）
+                if u.shape[0] > 8 and u.shape[1] > 8:
+                    skip_step = max(1, min(u.shape[0]//8, u.shape[1]//8))
+                    skip = (slice(None, None, skip_step), slice(None, None, skip_step))
+                    if np.max(magnitude) > 1e-10:  # 只有当有显著速度时才显示箭头
+                        scale = np.max(magnitude) * 20  # 动态调整箭头大小
+                        ax1.quiver(x[skip], y[skip], u[skip], v[skip], 
+                                 scale=scale, color='white', alpha=0.8, width=0.003)
+                
+                # 设置总标题
+                title = f'Navier-Stokes Solution - {stage}'
+                if step_info:
+                    title += f'\n{step_info}'
+                plt.suptitle(title, fontsize=16)
+                plt.tight_layout()
+                
+                # 如果提供了保存目录，则保存图像
+                if save_dir is not None:
+                    safe_stage_name = stage.replace(" ", "_").replace("/", "_").replace("\\", "_")
+                    save_path = os.path.join(save_dir, f'velocity_{safe_stage_name}.png')
+                    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                    print(f"保存可视化图像: {save_path}")
+                plt.close()  # 总是关闭图形以释放内存
+                
+            except Exception as e:
+                print(f"可视化出错 ({stage}): {e}")
+                if 'fig' in locals():
+                    plt.close(fig)
+
+        # 添加增强的监控函数
+        def log_velocity_change(stage, old_vel=None, save_dir=None, detailed_stats=True, force_visualize=False, use_real_time_velocity=True):
+            """
+            记录速度变化的监控函数
+            
+            当 use_real_time_velocity=True 时：
+            - 直接从 domain.velocityResult 读取实时计算结果
+            - 这避免了需要先调用 CopyVelocityResultToBlocks 才能获取最新速度的问题
+            - 可以在算法的任何阶段获取到当前的实时计算状态
+            
+            当 use_real_time_velocity=False 时：
+            - 使用传统方法从 domain.getBlock(0).velocity 获取速度
+            - 这种方法只能获取到上次 CopyVelocityResultToBlocks 之后的状态
+            """
+            # 获取实时速度：优先使用 velocityResult（实时计算结果），如果需要则回退到 block velocity
+            if use_real_time_velocity and hasattr(domain, 'velocityResult') and domain.velocityResult is not None:
+                # 将实时速度结果reshape为与block velocity相同的格式
+                current_vel_flat = domain.velocityResult.detach().cpu()
+                # 从一维结果重构为block格式 [batch, channels, height, width]
+                velocity_shape = domain.getBlock(0).velocity.shape
+                current_vel = current_vel_flat.view(velocity_shape)
+            else:
+                # 回退到传统方法：从block获取速度（可能不是最新的）
+                current_vel = domain.getBlock(0).velocity.detach().cpu()
+            
+            # 计算当前速度场的统计信息
+            u_current = current_vel[0, 0]
+            v_current = current_vel[0, 1]
+            mag_current = torch.sqrt(u_current**2 + v_current**2)
+            
+            max_mag = torch.max(mag_current).item()
+            mean_mag = torch.mean(mag_current).item()
+            max_u = torch.max(torch.abs(u_current)).item()
+            max_v = torch.max(torch.abs(v_current)).item()
+            
+            step_info = f"Max vel: {max_mag:.6f}, Mean vel: {mean_mag:.6f}, Max |u|: {max_u:.6f}, Max |v|: {max_v:.6f}"
+            
+            change_data = {}
+            
+            # 判断是否应该进行可视化
+            should_visualize = (save_dir is not None and enable_detailed_visualization and 
+                              (force_visualize or (step % visualization_frequency == 0)))
+            
+            if old_vel is not None:
+                # 计算变化量
+                diff_vel = current_vel - old_vel
+                max_diff = torch.max(torch.abs(diff_vel)).item()
+                mean_diff = torch.mean(torch.abs(diff_vel)).item()
+                rms_diff = torch.sqrt(torch.mean(diff_vel**2)).item()
+                
+                # 保存变化数据供收敛性分析使用
+                change_data = {
+                    'max_diff': max_diff,
+                    'mean_diff': mean_diff,
+                    'rms_diff': rms_diff
+                }
+                
+                # 相对变化
+                if max_mag > 1e-12:
+                    rel_max_diff = max_diff / max_mag
+                    rel_mean_diff = mean_diff / max_mag
+                else:
+                    rel_max_diff = 0.0
+                    rel_mean_diff = 0.0
+                
+                print(f"\n{stage}:")
+                print(f"  绝对变化 - Max: {max_diff:.8f}, Mean: {mean_diff:.8f}, RMS: {rms_diff:.8f}")
+                print(f"  相对变化 - Max: {rel_max_diff:.6%}, Mean: {rel_mean_diff:.6%}")
+                print(f"  当前状态 - {step_info}")
+                
+                # 记录收敛性历史
+                analyze_convergence(stage, change_data)
+                
+                # 可视化当前速度场
+                if should_visualize:
+                    visualize_velocity(current_vel, stage, save_dir, step_info)
+                    
+                    # 可视化变化量（如果变化显著）
+                    if max_diff > 1e-8:  # 只有当变化显著时才可视化差异
+                        diff_info = f"Max change: {max_diff:.8f}, Mean change: {mean_diff:.8f}"
+                        visualize_velocity(diff_vel, f"{stage} (Change)", save_dir, diff_info)
+                
+            else:
+                print(f"\n{stage}:")
+                print(f"  初始状态 - {step_info}")
+                # 初始状态只可视化当前速度场
+                if should_visualize or force_visualize:
+                    visualize_velocity(current_vel, stage, save_dir, step_info)
+                
+            return current_vel, change_data
+        
+        # 添加收敛性分析函数
+        convergence_history = {'stage': [], 'max_change': [], 'mean_change': [], 'rms_change': []}
+        
+        def analyze_convergence(stage, change_data):
+            """分析并记录收敛历史"""
+            convergence_history['stage'].append(stage)
+            convergence_history['max_change'].append(change_data.get('max_diff', 0))
+            convergence_history['mean_change'].append(change_data.get('mean_diff', 0))
+            convergence_history['rms_change'].append(change_data.get('rms_diff', 0))
+            
+            # 每5步绘制一次收敛曲线
+            if len(convergence_history['stage']) >= 2 and len(convergence_history['stage']) % 5 == 0:
+                try:
+                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+                    
+                    stages = range(len(convergence_history['stage']))
+                    
+                    # 绘制变化量的演化
+                    ax1.semilogy(stages, convergence_history['max_change'], 'b-o', label='Max Change', markersize=4)
+                    ax1.semilogy(stages, convergence_history['mean_change'], 'g-s', label='Mean Change', markersize=4)
+                    ax1.semilogy(stages, convergence_history['rms_change'], 'r-^', label='RMS Change', markersize=4)
+                    ax1.set_xlabel('Solution Step')
+                    ax1.set_ylabel('Velocity Change (log scale)')
+                    ax1.set_title('PISO Algorithm Convergence History')
+                    ax1.legend()
+                    ax1.grid(True, alpha=0.3)
+                    
+                    # 绘制最近几步的收敛率
+                    if len(stages) > 3:
+                        recent_stages = stages[-5:]
+                        recent_max = [convergence_history['max_change'][i] for i in recent_stages]
+                        ax2.plot(recent_stages, recent_max, 'b-o', label='Recent Max Change', markersize=6)
+                        ax2.set_xlabel('Recent Solution Steps')
+                        ax2.set_ylabel('Max Velocity Change')
+                        ax2.set_title('Recent Convergence Behavior')
+                        ax2.legend()
+                        ax2.grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    
+                    if vis_dir:
+                        conv_path = os.path.join(vis_dir, f'convergence_history_step_{len(stages)}.png')
+                        plt.savefig(conv_path, dpi=150, bbox_inches='tight')
+                        print(f"保存收敛历史图: {conv_path}")
+                    
+                    plt.close()
+                except Exception as e:
+                    print(f"绘制收敛历史出错: {e}")
+
+        # 可视化控制参数
+        enable_detailed_visualization = True  # 设置为False可以禁用详细可视化
+        visualization_frequency = 1  # 每N个步骤保存一次可视化（1表示每步都保存）
+
+        # 如果设置了可视化步数上限，则超过上限后关闭可视化
+        if self.visualize_max_steps is not None and self.total_step >= self.visualize_max_steps:
+            enable_detailed_visualization = False
+        
+        # 创建保存可视化结果的目录
+        if self.log_dir is not None and enable_detailed_visualization:
+            vis_dir = os.path.join(self.log_dir, f'velocity_visualization_step_{self.total_step}')
+            os.makedirs(vis_dir, exist_ok=True)
+            print(f"可视化结果将保存到: {vis_dir}")
+            print(f"可视化频率: 每{visualization_frequency}步保存一次")
+        else:
+            vis_dir = None
+            if not enable_detailed_visualization:
+                #print("详细可视化已禁用")
+                pass
+            elif self.log_dir is None:
+                print("警告: 未设置log_dir，可视化结果将不会保存")
         
         for step in range(iterations):
             with SAMPLE("PISO step"):
-                #_LOG.info("Substep %d", step)
+                #print(f"\n=== Starting PISO step {step} ===")
+                
+                # 记录初始状态（强制可视化，初始状态使用传统方法）
+                # initial_velocity, _ = log_velocity_change("Initial state", None, vis_dir, force_visualize=True, use_real_time_velocity=False)
+                
                 if self.convergence_tol is not None:
                     self.__backend.CopyVelocityResultFromBlocks(domain)
                     last_vel = domain.velocityResult.clone().detach()
@@ -1106,6 +1389,9 @@ class Simulation:
                         domain.setVelocityResult(velocityResult)
                         domain.UpdateDomainData()
                         
+                        # 记录对流步骤后的变化（使用实时速度）
+                        # _, _ = log_velocity_change("After advection", initial_velocity, vis_dir, use_real_time_velocity=True)
+                        
                     else:
                         self.__backend.CopyVelocityResultFromBlocks(domain) # needed for non-ortho components on RHS
                         
@@ -1138,8 +1424,12 @@ class Simulation:
                 if self._check_stop():
                     break
                 
+                # 记录修正步骤前的状态（使用实时速度）
+                #pre_corrector_velocity, _ = log_velocity_change("Before corrector steps", initial_velocity, vis_dir, use_real_time_velocity=True)
+                
                 for cstep in range(self.corrector_steps):
                     with SAMPLE("corrector step"):
+                        #print(f"\n--- Corrector step {cstep} ---")
                         
                         if not self.non_orthogonal: # orthogonal version with gradient/backprop support
                             self.__backend.SetupPressureCorrection(domain, time_step, 0, pressure_use_face_transform, timeStepNorm=self.pressure_time_step_normalized)
@@ -1217,13 +1507,22 @@ class Simulation:
 
                         self.__backend.CorrectVelocity(domain, time_step, version=vcv, timeStepNorm=self.pressure_time_step_normalized) #vcv
 
+                        # 记录每个修正步骤后的变化（使用实时速度）
+                        # _, _ = log_velocity_change(f"After corrector step {cstep}", pre_corrector_velocity, vis_dir, use_real_time_velocity=True)
+                        
                         self._run_prep_fn("POST_VELOCITY_CORRECTION", domain=domain, local_step=step, time_step=time_step, total_step=self.total_step)
                             
                         if self._check_stop():
                             break
                 
+                # 记录整个时间步结束后的最终变化（强制可视化，使用实时速度）
+                # 注意：这里使用 use_real_time_velocity=True 来直接读取 domain.velocityResult 中的实时计算结果
+                # _, final_change_data = log_velocity_change("End of PISO step", initial_velocity, vis_dir, force_visualize=True, use_real_time_velocity=True)
+                
+                # 只在此处执行一次 CopyVelocityResultToBlocks，将实时计算结果复制到各个块中
+                # 这样确保整个算法中只有一次这个操作，避免重复和不必要的性能开销
                 self.__backend.CopyVelocityResultToBlocks(domain)
-
+                
                 self._run_prep_fn("POST", domain=domain, local_step=step, time_step=time_step, total_step=self.total_step)
                 
                 if self.convergence_tol is not None:
@@ -1281,10 +1580,10 @@ class Simulation:
                 
                 if not sim_ok or self._check_stop():
                     return False
-        self.__LOG.info("Adaptive time step %.03e (CFL=%.02f) used %d substeps.", self.time_step, CFL_cond, substep)
+        #self.__LOG.info("Adaptive time step %.03e (CFL=%.02f) used %d substeps.", self.time_step, CFL_cond, substep)
         return True
     
-    def run(self, iterations, static=False, log_domain=True):
+    def run(self, iterations, static=False, log_domain=False):
         self._check_domain()
         # time_step: physical time to pass per iteration and substep
         # substeps: how many piso steps to make per iteration
@@ -1300,7 +1599,7 @@ class Simulation:
 
         if self.log_interval>0 and self.log_images and self.log_dir is None:
             raise ValueError("need to specify log/output directory")
-        self.__LOG.info("Starting sim with %d iterations, output in %s.", iterations, self.log_dir or "NONE")
+        #self.__LOG.info("Starting sim with %d iterations, output in %s.", iterations, self.log_dir or "NONE")
         if log_domain:
             self.__LOG.info(str(domain))
             for blockIdx in range(domain.getNumBlocks()):
@@ -1363,7 +1662,7 @@ class Simulation:
                     #LOG.info("It: %d/%d", it, iterations)
                     log = self.log_interval>0 and (it%self.log_interval)==0
                     
-                    self.__LOG.info("It: %d/%d, substeps:%s, timestep:%f", it, iterations, "adaptive" if adaptive_step else substeps, time_step_target)
+                    #self.__LOG.info("It: %d/%d, substeps:%s, timestep:%f", it, iterations, "adaptive" if adaptive_step else substeps, time_step_target)
                     with SAMPLE("simIt"):
                         try:
                             if static:
@@ -1425,7 +1724,7 @@ class Simulation:
         if self.save_domain_name is not None:
             self.save_domain(self.save_domain_name)
         
-        self.__LOG.info("sim finished after %d total steps", self.total_step)
+        #self.__LOG.info("sim finished after %d total steps", self.total_step)
         
         return sim_ok
 

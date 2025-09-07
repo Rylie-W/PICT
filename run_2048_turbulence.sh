@@ -1,0 +1,21 @@
+python generate_turbulence_data_pict.py \
+    --use_warmup_data_init \
+    --training_data_dir "./training_data" \
+    --high_res 2048 \
+    --low_res 2048 \
+    --save_interval 10 \
+    --generate_steps 12200 \
+    --warmup_time 4.0 \
+    --max_velocity 4.2 \
+    --viscosity 1e-3 \
+    --peak_wavenumber 2 \
+    --cfl_safety_factor 0.3 \
+    --integral_scale_factor 3.0 \
+    --taylor_reynolds 20.0 \
+    --decay \
+    --save_file "turbulence_2048" \
+    --save_index 1 \
+    --seed 42 \
+    --dims 2 \
+    --save_dir "/mnt/data/yiwei/pict/2048" \
+    --visualize_max_steps 2 

@@ -14,10 +14,11 @@ def getInfoForPid(pid):
 
 
 #filter_gpu = re.compile(r"\|\s+(\d+).+\|\s+([0-9A-F]{8}\:[0-9A-F]{2}\:[0-9A-F]{2}\.[0-9A-F])")
-filter_gpu = re.compile(r"\|\s+(?P<gpu>\d+)\s+(?P<name>.+)\s+(?P<persm>\w+)\s+\|\s+(?P<busid>[0-9A-F]{8}\:[0-9A-F]{2}\:[0-9A-F]{2}\.[0-9A-F])\s+(?P<disp>\w+)\s+\|")
+filter_gpu = re.compile(r"\|\s+(?P<gpu>\d+)\s+(?P<n>.+)\s+(?P<persm>\w+)\s+\|\s+(?P<busid>[0-9A-F]{8}\:[0-9A-F]{2}\:[0-9A-F]{2}\.[0-9A-F])\s+(?P<disp>\w+)\s+\|")
 #filter_mem = re.compile(r".+\|\s+(\d+)MiB\s+/\s+(\d+)MiB\s+\|")#')
 # | 31%   54C    P2    61W / 250W |   1421MiB / 11177MiB |     28%      Default |
-filter_mem = re.compile(r"\|\s+(?P<fan>\d+)%\s+(?P<temp>\d+)(C|F)\s+(?P<perf>.+)\s+(?P<curpwr>\d+)W\s+/\s+(?P<maxpwr>\d+)W\s+\|\s+(?P<curmem>\d+)MiB\s+/\s+(?P<maxmem>\d+)MiB\s+\|\s+(?P<util>\d+)%\s+(?P<compm>.+)\s+\|")#')
+# Updated pattern to handle both fan percentage and "N/A" case
+filter_mem = re.compile(r"\|\s+(?P<fan>\d+%|N/A)\s+(?P<temp>\d+)(C|F)\s+(?P<perf>.+)\s+(?P<curpwr>\d+)W\s+/\s+(?P<maxpwr>\d+)W\s+\|\s+(?P<curmem>\d+)MiB\s+/\s+(?P<maxmem>\d+)MiB\s+\|\s+(?P<util>\d+)%\s+(?P<compm>.+)\s+\|")#')
 #filter_process = re.compile(r'\|\s+(\d+)\s+(\d{1,6})\s+.+\s+([0-9a-zA-Z_/.-]+)\s+(\d+)MiB\s+\|')
 filter_process = re.compile(r'\|\s+(?P<gpu>\d+)(\s+.+)?\s+(?P<pid>\d{1,6})\s+.+\s+(?P<name>[0-9a-zA-Z_/.-]+)\s+(?P<mem>\d+)MiB\s+\|')
 def getGPUInfo(active_mem_threshold=0.05, verbose=False):
@@ -35,7 +36,15 @@ def getGPUInfo(active_mem_threshold=0.05, verbose=False):
             info[last_gpu]={'id':last_gpu, 'bus':g.group("busid"), 'processes':[]}
         elif m is not None and last_gpu!=-1:
             if verbose: print('{}: {:.03f}% Memory'.format(last_gpu, 100.0*float(m.group("curmem"))/float(m.group("maxmem"))))
-            info[last_gpu].update({'mem_used':int(m.group("curmem")), 'mem_max':int(m.group("maxmem")), 'util':float(m.group("util"))/100.0, 'fan':float(m.group("fan"))/100.0, 'temp':float(m.group("temp")), 'pwr_used':int(m.group("curpwr")),'pwr_max':int(m.group("maxpwr")) })
+            # Handle fan value - can be either "N/A" or a percentage like "31%"
+            fan_str = m.group("fan")
+            if fan_str == "N/A":
+                fan_value = 0.0  # or could use None, but 0.0 is safer for calculations
+            else:
+                # Remove the % sign and convert to float
+                fan_value = float(fan_str.rstrip('%')) / 100.0
+            
+            info[last_gpu].update({'mem_used':int(m.group("curmem")), 'mem_max':int(m.group("maxmem")), 'util':float(m.group("util"))/100.0, 'fan':fan_value, 'temp':float(m.group("temp")), 'pwr_used':int(m.group("curpwr")),'pwr_max':int(m.group("maxpwr")) })
             last_gpu = -1
         elif p is not None:
             pid = int(p.group("pid"))
@@ -49,7 +58,12 @@ def getGPUInfo(active_mem_threshold=0.05, verbose=False):
         #info += line
     info_process.communicate()
     for gpu_id, gpu_info in info.items():
-        if len(gpu_info['processes'])==0 or (gpu_info['mem_used']/gpu_info['mem_max'])<active_mem_threshold:
+        # Add error handling for missing memory keys
+        mem_used = gpu_info.get('mem_used', 0)
+        mem_max = gpu_info.get('mem_max', 1)
+        mem_ratio = mem_used / mem_max if mem_max > 0 else 0
+        
+        if len(gpu_info['processes'])==0 or mem_ratio < active_mem_threshold:
             gpu_info['available']=True
         else:
             gpu_info['available']=False
@@ -63,9 +77,10 @@ def getAvailableGPU(active_mem_threshold=0.05, sorting="MEMORY"):
             available.append(gpu_id)
     # sort by number of processes, then memory usage
     if sorting=="MEMORY":
-        available.sort(key=lambda gpu_id: gpu_info[gpu_id]['mem_used']/gpu_info[gpu_id]['mem_max'])
+        # Add error handling for missing keys
+        available.sort(key=lambda gpu_id: gpu_info[gpu_id].get('mem_used', 0)/gpu_info[gpu_id].get('mem_max', 1))
     elif sorting=="PROCESSES_MEMORY":
-        available.sort(key=lambda gpu_id: len(gpu_info[gpu_id]['processes']) + gpu_info[gpu_id]['mem_used']/gpu_info[gpu_id]['mem_max'])
+        available.sort(key=lambda gpu_id: len(gpu_info[gpu_id]['processes']) + gpu_info[gpu_id].get('mem_used', 0)/gpu_info[gpu_id].get('mem_max', 1))
     return available
 
 
