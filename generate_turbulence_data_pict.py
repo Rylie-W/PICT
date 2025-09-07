@@ -630,6 +630,8 @@ def main():
     parser.add_argument('--warmup_time', type=float, default=0.0)
     
     # Physical parameters
+    parser.add_argument('--kolmogorov', type=bool, default=False)
+    parser.add_argument('--forcing_scale', type=float, default=1.0)
     parser.add_argument('--max_velocity', type=float, default=4.2)
     parser.add_argument('--cfl_safety_factor', type=float, default=0.5)
     parser.add_argument('--viscosity', type=float, default=1e-3)
