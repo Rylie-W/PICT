@@ -1421,6 +1421,7 @@ class TurbulenceDataGenerator:
             warmup_timestep, training_timestep, warmup_steps = timestep_info
 
             if self.args.kolmogorov:
+                prep_fn = {}
                 def pfn_set_forcing(domain, time_step, **kwargs):
                     forcing = self.kolmogorov_forcing(domain.getBlock(0).velocity, self.args.forcing_scale, self.args.linear_coefficient)
                     domain.getBlock(0).setVelocitySource(forcing)
