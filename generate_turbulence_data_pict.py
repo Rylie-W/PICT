@@ -254,11 +254,11 @@ class TurbulenceDataGenerator:
         self.logger = logging.getLogger("TurbulenceGen")
         
         # Initialize Kolmogorov forcing if enabled
-        if getattr(args, 'kolmogorov', False):
-            self.forcing_net = KolmogorovForcing(
-                forcing_scale=getattr(args, 'forcing_scale', 1.0),
-                linear_coefficient=getattr(args, 'linear_coefficient', -0.1),
-                forcing_wavenumber=getattr(args, 'forcing_wavenumber', 2.0),
+        if self.args.kolmogorov:
+            self.kolmogorov_forcing = KolmogorovForcing(
+                forcing_scale=self.args.forcing_scale / self.args.cfl_safety_factor,
+                linear_coefficient=self.args.linear_coefficient / self.args.cfl_safety_factor,
+                forcing_wavenumber=self.args.peak_wavenumber / self.args.cfl_safety_factor,
                 target_energy_rate=getattr(args, 'target_energy_rate', None),
                 device=cuda_device,
                 dtype=self.dtype
@@ -1422,7 +1422,7 @@ class TurbulenceDataGenerator:
 
             if self.args.kolmogorov:
                 def pfn_set_forcing(domain, time_step, **kwargs):
-                    forcing = self.forcing_net(domain.getBlock(0).velocity, self.args.forcing_scale, self.args.linear_coefficient)
+                    forcing = self.kolmogorov_forcing(domain.getBlock(0).velocity, self.args.forcing_scale, self.args.linear_coefficient)
                     domain.getBlock(0).setVelocitySource(forcing)
                     domain.UpdateDomainData()
                 # register the callback: before each simulation step ("PRE") the simulation calls 'pfn_set_forcing'
@@ -1810,8 +1810,6 @@ def main():
     parser.add_argument('--warmup_time', type=float, default=4.0)
     
     # Physical parameters
-    parser.add_argument('--kolmogorov', type=bool, default=False)
-    parser.add_argument('--forcing_scale', type=float, default=1.0)
     parser.add_argument('--max_velocity', type=float, default=4.2)
     parser.add_argument('--cfl_safety_factor', type=float, default=0.5)
     parser.add_argument('--viscosity', type=float, default=1e-3)
@@ -1878,8 +1876,6 @@ def main():
                        help='Overall amplitude of Kolmogorov forcing')
     parser.add_argument('--linear_coefficient', type=float, default=-0.1,
                        help='Linear damping coefficient in forcing (-λ)')
-    parser.add_argument('--forcing_wavenumber', type=float, default=2.0,
-                       help='Maximum wavenumber for forcing (k_f)')
     parser.add_argument('--target_energy_rate', type=float, default=None,
                        help='Target energy injection rate for adaptive forcing (ε)')
     parser.add_argument('--forcing_analysis', action='store_true', default=False,
