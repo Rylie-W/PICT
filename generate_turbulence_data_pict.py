@@ -25,11 +25,244 @@ cuda_device = torch.device("cuda")
 cpu_device = torch.device("cpu")
 
 
+class KolmogorovForcing:
+    """
+    Kolmogorov turbulence forcing implementation.
+    
+    Maintains statistically steady turbulence by injecting energy at large scales
+    to balance viscous dissipation, following Kolmogorov theory.
+    
+    Mathematical formulation:
+    f(k) = A(k) * û(k) for |k| ≤ k_f
+    
+    where:
+    - A(k): amplitude function controlling energy injection rate
+    - û(k): velocity field in Fourier space  
+    - k_f: forcing wavenumber cutoff
+    """
+    
+    def __init__(self, forcing_scale=1.0, linear_coefficient=-0.1, 
+                 forcing_wavenumber=2.0, target_energy_rate=None,
+                 device=None, dtype=torch.float32):
+        """
+        Initialize Kolmogorov forcing.
+        
+        Args:
+            forcing_scale: Overall amplitude of forcing
+            linear_coefficient: Linear damping coefficient (-λ in exp(-λt))
+            forcing_wavenumber: Maximum wavenumber for forcing (k_f)
+            target_energy_rate: Target energy injection rate (ε)
+            device: Computing device (CPU/GPU)
+            dtype: Data type
+        """
+        self.forcing_scale = forcing_scale
+        self.linear_coefficient = linear_coefficient
+        self.forcing_wavenumber = forcing_wavenumber
+        self.target_energy_rate = target_energy_rate
+        self.device = device if device is not None else torch.device('cpu')
+        self.dtype = dtype
+        
+        # Energy injection tracking
+        self.energy_history = []
+        self.step_count = 0
+        
+    def __call__(self, velocity, forcing_scale=None, linear_coefficient=None):
+        """
+        Compute Kolmogorov forcing for given velocity field.
+        
+        Args:
+            velocity: Velocity field tensor [batch, channels, height, width]
+            forcing_scale: Override forcing scale
+            linear_coefficient: Override linear coefficient
+            
+        Returns:
+            forcing: Forcing field tensor with same shape as velocity
+        """
+        # Use provided parameters or defaults
+        f_scale = forcing_scale if forcing_scale is not None else self.forcing_scale
+        lin_coeff = linear_coefficient if linear_coefficient is not None else self.linear_coefficient
+        
+        # Get velocity field dimensions
+        batch_size, n_channels, *spatial_dims = velocity.shape
+        
+        if len(spatial_dims) == 2:  # 2D case
+            return self._compute_forcing_2d(velocity, f_scale, lin_coeff)
+        elif len(spatial_dims) == 3:  # 3D case
+            return self._compute_forcing_3d(velocity, f_scale, lin_coeff)
+        else:
+            raise ValueError(f"Unsupported spatial dimensions: {len(spatial_dims)}")
+    
+    def _compute_forcing_2d(self, velocity, forcing_scale, linear_coefficient):
+        """
+        Compute 2D Kolmogorov forcing.
+        
+        Mathematical formulation:
+        1. Transform to Fourier space: û = FFT(u)
+        2. Apply forcing filter: f̂ = A(k) * û for |k| ≤ k_f
+        3. Transform back: f = IFFT(f̂)
+        4. Add linear damping: f_total = f + λu
+        """
+        batch_size, n_channels, ny, nx = velocity.shape
+        
+        # Create wavenumber grids
+        ky = torch.fft.fftfreq(ny, device=self.device, dtype=self.dtype)
+        kx = torch.fft.fftfreq(nx, device=self.device, dtype=self.dtype)
+        KY, KX = torch.meshgrid(ky, kx, indexing='ij')
+        k_mag = torch.sqrt(KX**2 + KY**2)
+        
+        # Transform velocity to Fourier space
+        u_hat = torch.fft.fftn(velocity, dim=(-2, -1))
+        
+        # Create forcing mask (only force large scales)
+        forcing_mask = (k_mag <= self.forcing_wavenumber).float()
+        # Remove DC component (k=0)
+        forcing_mask[k_mag < 1e-10] = 0.0
+        
+        # Compute energy injection amplitude
+        if self.target_energy_rate is not None:
+            # Adaptive forcing to maintain target energy injection rate
+            current_energy = self._compute_kinetic_energy(velocity)
+            amplitude = self._compute_adaptive_amplitude(current_energy)
+        else:
+            # Fixed amplitude forcing
+            amplitude = forcing_scale
+        
+        # Apply forcing in Fourier space
+        # f̂(k) = A(k) * û(k) for |k| ≤ k_f
+        forcing_amplitude = amplitude * forcing_mask.unsqueeze(0).unsqueeze(0)
+        f_hat = forcing_amplitude * u_hat
+        
+        # Transform back to physical space
+        forcing_spectral = torch.fft.ifftn(f_hat, dim=(-2, -1)).real
+        
+        # Add linear damping term: -λu (helps maintain energy balance)
+        forcing_total = forcing_spectral + linear_coefficient * velocity
+        
+        # Update energy tracking
+        self._update_energy_tracking(velocity, forcing_total)
+        
+        return forcing_total.to(dtype=self.dtype)
+    
+    def _compute_forcing_3d(self, velocity, forcing_scale, linear_coefficient):
+        """
+        Compute 3D Kolmogorov forcing (similar to 2D but with z-dimension).
+        """
+        batch_size, n_channels, nz, ny, nx = velocity.shape
+        
+        # Create 3D wavenumber grids
+        kz = torch.fft.fftfreq(nz, device=self.device, dtype=self.dtype)
+        ky = torch.fft.fftfreq(ny, device=self.device, dtype=self.dtype)
+        kx = torch.fft.fftfreq(nx, device=self.device, dtype=self.dtype)
+        KZ, KY, KX = torch.meshgrid(kz, ky, kx, indexing='ij')
+        k_mag = torch.sqrt(KX**2 + KY**2 + KZ**2)
+        
+        # Transform to Fourier space
+        u_hat = torch.fft.fftn(velocity, dim=(-3, -2, -1))
+        
+        # Create forcing mask
+        forcing_mask = (k_mag <= self.forcing_wavenumber).float()
+        forcing_mask[k_mag < 1e-10] = 0.0
+        
+        # Compute amplitude
+        if self.target_energy_rate is not None:
+            current_energy = self._compute_kinetic_energy(velocity)
+            amplitude = self._compute_adaptive_amplitude(current_energy)
+        else:
+            amplitude = forcing_scale
+        
+        # Apply forcing
+        forcing_amplitude = amplitude * forcing_mask.unsqueeze(0).unsqueeze(0)
+        f_hat = forcing_amplitude * u_hat
+        
+        # Transform back
+        forcing_spectral = torch.fft.ifftn(f_hat, dim=(-3, -2, -1)).real
+        
+        # Add linear damping
+        forcing_total = forcing_spectral + linear_coefficient * velocity
+        
+        # Update tracking
+        self._update_energy_tracking(velocity, forcing_total)
+        
+        return forcing_total.to(dtype=self.dtype)
+    
+    def _compute_kinetic_energy(self, velocity):
+        """Compute total kinetic energy: E = (1/2)∫|u|²dV"""
+        kinetic_energy = 0.5 * torch.sum(velocity**2)
+        return kinetic_energy.item()
+    
+    def _compute_adaptive_amplitude(self, current_energy):
+        """
+        Compute adaptive forcing amplitude to maintain target energy injection rate.
+        
+        Uses simple proportional control:
+        A = A₀ * (ε_target / ε_current)^α
+        """
+        if len(self.energy_history) > 1:
+            # Estimate current energy injection rate
+            dt = 1.0  # Assume unit timestep
+            energy_change = current_energy - self.energy_history[-1]
+            current_rate = energy_change / dt
+            
+            if abs(current_rate) > 1e-10:
+                # Proportional control
+                amplitude = self.forcing_scale * (self.target_energy_rate / abs(current_rate))**0.1
+                # Clamp to reasonable range
+                amplitude = max(0.1 * self.forcing_scale, min(10.0 * self.forcing_scale, amplitude))
+            else:
+                amplitude = self.forcing_scale
+        else:
+            amplitude = self.forcing_scale
+            
+        return amplitude
+    
+    def _update_energy_tracking(self, velocity, forcing):
+        """Update energy tracking for adaptive forcing."""
+        kinetic_energy = self._compute_kinetic_energy(velocity)
+        self.energy_history.append(kinetic_energy)
+        
+        # Keep only recent history
+        if len(self.energy_history) > 100:
+            self.energy_history.pop(0)
+            
+        self.step_count += 1
+        
+        # Log energy statistics periodically
+        if self.step_count % 100 == 0:
+            energy_injection = torch.sum(velocity * forcing).item()
+            print(f"Step {self.step_count}: KE={kinetic_energy:.3e}, "
+                  f"Energy injection={energy_injection:.3e}")
+    
+    def get_energy_statistics(self):
+        """Get current energy statistics."""
+        if len(self.energy_history) < 2:
+            return {"kinetic_energy": 0.0, "energy_rate": 0.0}
+            
+        current_energy = self.energy_history[-1]
+        energy_rate = self.energy_history[-1] - self.energy_history[-2]
+        
+        return {
+            "kinetic_energy": current_energy,
+            "energy_rate": energy_rate,
+            "step_count": self.step_count
+        }
+
+
 class TurbulenceDataGenerator:
     def __init__(self, args):
         self.args = args
         self.dtype = torch.float32
         self.logger = logging.getLogger("TurbulenceGen")
+        
+        # Initialize Kolmogorov forcing if enabled
+        if getattr(args, 'kolmogorov', False):
+            self.forcing_net = KolmogorovForcing(
+                forcing_scale=getattr(args, 'forcing_scale', 1.0),
+                linear_coefficient=getattr(args, 'linear_coefficient', -0.1),
+                forcing_wavenumber=getattr(args, 'forcing_wavenumber', 2.0),
+                target_energy_rate=getattr(args, 'target_energy_rate', None),
+                device=cuda_device,
+                dtype=self.dtype
+            )
         
     def create_domain(self, resolution):
         """Create a 3D periodic domain for turbulence simulation"""
@@ -1186,6 +1419,14 @@ class TurbulenceDataGenerator:
             # Calculate timesteps for this resolution
             timestep_info = self._calculate_simulation_timesteps(resolution, hr_training_timestep, initial_velocity)
             warmup_timestep, training_timestep, warmup_steps = timestep_info
+
+            if self.args.kolmogorov:
+                def pfn_set_forcing(domain, time_step, **kwargs):
+                    forcing = self.forcing_net(domain.getBlock(0).velocity, self.args.forcing_scale, self.args.linear_coefficient)
+                    domain.getBlock(0).setVelocitySource(forcing)
+                    domain.UpdateDomainData()
+                # register the callback: before each simulation step ("PRE") the simulation calls 'pfn_set_forcing'
+                PISOtorch_simulation.append_prep_fn(prep_fn, "PRE", pfn_set_forcing)
             
             # Create simulation instance for this resolution
             sim = self.create_simulation(
@@ -1629,6 +1870,20 @@ def main():
                        help='Enable step-by-step comparison with reference training data and visualization')
     parser.add_argument('--training_data_dir', type=str, default='./training_data/warmup_data',
                        help='Directory containing training data files')
+    
+    # Kolmogorov forcing parameters
+    parser.add_argument('--kolmogorov', action='store_true', default=False,
+                       help='Enable Kolmogorov forcing for statistically steady turbulence')
+    parser.add_argument('--forcing_scale', type=float, default=1.0,
+                       help='Overall amplitude of Kolmogorov forcing')
+    parser.add_argument('--linear_coefficient', type=float, default=-0.1,
+                       help='Linear damping coefficient in forcing (-λ)')
+    parser.add_argument('--forcing_wavenumber', type=float, default=2.0,
+                       help='Maximum wavenumber for forcing (k_f)')
+    parser.add_argument('--target_energy_rate', type=float, default=None,
+                       help='Target energy injection rate for adaptive forcing (ε)')
+    parser.add_argument('--forcing_analysis', action='store_true', default=False,
+                       help='Enable detailed forcing analysis and energy tracking')
     
     args = parser.parse_args()
     
