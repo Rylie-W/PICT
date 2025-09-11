@@ -745,8 +745,8 @@ class TurbulenceDataGenerator:
 
             save_dir = Path(self.args.save_dir)
         
-            data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_0.npz"
-            domain_io.save_domain(domain, data_file)
+            data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}"
+            domain_io.save_domain(domain, str(data_file))
             
         
         # 保存最后剩余的数据
@@ -1171,8 +1171,8 @@ class TurbulenceDataGenerator:
             save_dir = Path(self.args.save_dir)
             save_dir.mkdir(parents=True, exist_ok=True)
         
-            data_file = save_dir / f"{self.args.save_file}_warmup_{resolution}x{resolution}_step_0.npz"
-            domain_io.save_domain(domain, data_file)
+            data_file = save_dir / f"{self.args.save_file}_warmup_{resolution}x{resolution}_step_0"
+            domain_io.save_domain(domain, str(data_file))
             
             # Calculate timesteps for this resolution
             timestep_info = self._calculate_simulation_timesteps(resolution, hr_training_timestep, initial_velocity)
@@ -1302,7 +1302,7 @@ class TurbulenceDataGenerator:
             w_data = trajectory[:, 0, 2, :, :, :]  # z-velocity
             
             np.savez_compressed(
-                data_file,
+                str(data_file),
                 u=u_data,
                 v=v_data,
                 w=w_data,
@@ -1326,7 +1326,7 @@ class TurbulenceDataGenerator:
             v_data = trajectory[:, 0, 1, :, :]  # y-velocity
             
             np.savez_compressed(
-                data_file,
+                str(data_file),
                 u=u_data,
                 v=v_data,
                 time_array=time_array,  # Use consistent field name with training data
@@ -1370,7 +1370,7 @@ class TurbulenceDataGenerator:
             w_data = warmup_trajectory[:, 0, 2, :, :, :]  # z-velocity
             
             np.savez_compressed(
-                trajectory_file,
+                str(trajectory_file),
                 u=u_data,
                 v=v_data,
                 w=w_data,
@@ -1393,7 +1393,7 @@ class TurbulenceDataGenerator:
             v_data = warmup_trajectory[:, 0, 1, :, :]  # y-velocity
             
             np.savez_compressed(
-                trajectory_file,
+                str(trajectory_file),
                 u=u_data,
                 v=v_data,
                 time_array=time_array,
