@@ -1483,11 +1483,14 @@ class TurbulenceDataGenerator:
             self.logger.info(f"{'='*60}")
             
             if resolution == self.args.warmup_res:
-                domain =domain_io.load_domain(self.args.training_data_dir / f"{self.args.check_data_prefix}_{resolution}x{resolution}_step_0", dtype=torch.float32, device=torch.device("cuda"))
+                domain =domain_io.load_domain(Path(self.args.training_data_dir) / f"{self.args.check_data_prefix}_{resolution}x{resolution}_step_0", dtype=torch.float32, device=torch.device("cuda"))
             else:
                 if self.args.downsample_start_step is not None and self.args.downsample_end_step is not None and self.args.ref_data_prefix is not None:
                     for step in range(self.args.downsample_start_step, self.args.downsample_end_step, 1000):
-                        high_domain = domain_io.load_domain(self.args.training_data_dir / f"{self.args.ref_data_prefix}_step_{step}", dtype=torch.float32, device=torch.device("cuda"))
+                        high_domain = domain_io.load_domain(
+                            str(Path(self.args.training_data_dir) / f"{self.args.ref_data_prefix}_step_{step}"), 
+                            dtype=torch.float32, 
+                            device=torch.device("cuda"))
                         domain, _ = self.create_domain(resolution)
                         downsample_domain(domain, high_domain)
 
