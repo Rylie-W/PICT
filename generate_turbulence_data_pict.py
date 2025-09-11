@@ -21,7 +21,6 @@ from scipy.interpolate import griddata
 from lib.data import shapes
 import PISOtorch
 from lib.util import domain_io
-import config
 import PISOtorch_simulation
 
 def downsample_field(high_coords, low_coords, high_data):
