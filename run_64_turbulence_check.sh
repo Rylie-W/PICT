@@ -9,7 +9,7 @@ RESOLUTION_RATIO=16
 # 所以 integral_scale_factor = 1024/340 ≈ 3.0 (保持不变)
 
 python generate_turbulence_data_pict.py \
-    --training_data_dir "/mnt/data/yiwei/pict/64" \
+    --training_data_dir "/mnt/data/yiwei/pict" \
     --ref_data_prefix "turbulence_ref" \
     --downsample_start_step 0 \
     --downsample_end_step 7000 \
