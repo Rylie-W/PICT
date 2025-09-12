@@ -1079,13 +1079,18 @@ class TurbulenceDataGenerator:
         trajectory_data = []
 
         # Run simulation and collect data
-        for step in range(start_step if start_step is not None else 0 + save_interval, steps + save_interval + start_step if start_step is not None else steps + save_interval, save_interval):
+        start = (start_step if start_step is not None else 0) + save_interval
+        end = (start_step if start_step is not None else 0) + steps + save_interval
+        for step in range(start, end, save_interval):
             sim.run(iterations=save_interval)
 
-            save_dir = Path(self.args.save_dir + f"/check/step_{start_step}" if start_step is not None else self.args.save_dir)
+            if start_step is not None:
+                save_dir = Path(self.args.save_dir) / "check" / f"step_{start_step}"
+            else:
+                save_dir = Path(self.args.save_dir)
             save_dir.mkdir(parents=True, exist_ok=True)
 
-            data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}" if start_step is not None else save_dir /"check"/ f"step_{start_step}" / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}"
+            data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}"
             domain_io.save_domain(domain, str(data_file))
             self.logger.info(f"Saved domain to {data_file}")
             
