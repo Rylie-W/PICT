@@ -1077,15 +1077,17 @@ class TurbulenceDataGenerator:
         
         # Storage for trajectory data
         trajectory_data = []
-        
+
         # Run simulation and collect data
         for step in range(start_step + save_interval, steps+start_step + save_interval, save_interval):
             sim.run(iterations=save_interval)
 
             save_dir = Path(self.args.save_dir + f"/check/step_{start_step}" if start_step != 0 else self.args.save_dir)
-        
+            save_dir.mkdir(parents=True, exist_ok=True)
+
             data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}" if start_step == 0 else save_dir /"check"/ f"step_{start_step}" / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}"
             domain_io.save_domain(domain, str(data_file))
+            self.logger.info(f"Saved domain to {data_file}")
             
         
         # 保存最后剩余的数据
@@ -1495,7 +1497,7 @@ class TurbulenceDataGenerator:
                         domain, _ = self.create_domain(resolution)
                         downsample_domain(domain, high_domain)
 
-                        save_dir = Path(self.args.save_dir + f"/check/step_{step+self.args.downsample_start_step}")
+                        save_dir = Path(self.args.save_dir + f"/check/step_{step}")
                         save_dir.mkdir(parents=True, exist_ok=True)
                         data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}"
                         domain_io.save_domain(domain, str(data_file))
