@@ -1495,7 +1495,7 @@ class TurbulenceDataGenerator:
                         domain, _ = self.create_domain(resolution)
                         downsample_domain(domain, high_domain)
 
-                        save_dir = Path(self.args.save_dir + f"/check/step_{step}")
+                        save_dir = Path(self.args.save_dir + f"/check/step_{step+self.args.downsample_start_step}")
                         save_dir.mkdir(parents=True, exist_ok=True)
                         data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}"
                         domain_io.save_domain(domain, str(data_file))
