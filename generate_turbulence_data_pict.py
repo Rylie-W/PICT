@@ -27,18 +27,22 @@ cpu_device = torch.device("cpu")
 
 class KolmogorovForcing:
     """
-    Kolmogorov turbulence forcing implementation.
+    Classic Kolmogorov turbulence forcing implementation - matches JAX cfd-ml.
     
-    Maintains statistically steady turbulence by injecting energy at large scales
-    to balance viscous dissipation, following Kolmogorov theory.
+    Maintains statistically steady turbulence by applying external sinusoidal 
+    driving force plus linear damping, following the standard Kolmogorov forcing.
     
-    Mathematical formulation:
-    f(k) = A(k) * û(k) for |k| ≤ k_f
+    Mathematical formulation (matching JAX cfd-ml):
+    f_u = scale * sin(k * y)     # External sinusoidal driving in u-component
+    f_v = 0                      # No external force in v-component
+    f_w = 0                      # No external force in w-component (3D only)
+    f_total = [f_u, f_v, f_w] + λ * velocity  # Add linear damping
     
     where:
-    - A(k): amplitude function controlling energy injection rate
-    - û(k): velocity field in Fourier space  
-    - k_f: forcing wavenumber cutoff
+    - scale: forcing amplitude
+    - k: forcing wavenumber (typically 2)
+    - λ: linear damping coefficient (typically -0.1)
+    - y: spatial coordinate in y-direction
     """
     
     def __init__(self, forcing_scale=1.0, linear_coefficient=-0.1, 
@@ -94,49 +98,47 @@ class KolmogorovForcing:
     
     def _compute_forcing_2d(self, velocity, forcing_scale, linear_coefficient):
         """
-        Compute 2D Kolmogorov forcing.
+        Compute 2D Kolmogorov forcing - Classic implementation matching JAX.
         
-        Mathematical formulation:
-        1. Transform to Fourier space: û = FFT(u)
-        2. Apply forcing filter: f̂ = A(k) * û for |k| ≤ k_f
-        3. Transform back: f = IFFT(f̂)
-        4. Add linear damping: f_total = f + λu
+        Mathematical formulation (matching JAX cfd-ml):
+        f_u = scale * sin(k * y)  # External sinusoidal driving in u-component
+        f_v = 0                   # No external force in v-component  
+        f_total = [f_u, f_v] + λ * velocity  # Add linear damping
+        
+        This matches the JAX implementation:
+        u_force = scale * sin(k * y)
+        v_force = 0
         """
         batch_size, n_channels, ny, nx = velocity.shape
         
-        # Create wavenumber grids
-        ky = torch.fft.fftfreq(ny, device=self.device, dtype=self.dtype)
-        kx = torch.fft.fftfreq(nx, device=self.device, dtype=self.dtype)
-        KY, KX = torch.meshgrid(ky, kx, indexing='ij')
-        k_mag = torch.sqrt(KX**2 + KY**2)
+        # Create spatial coordinates (assuming domain [0, 2π * domain_scale])
+        domain_length = 2 * np.pi  # Standard domain for Kolmogorov forcing
+        dy = domain_length / ny
+        y_coords = torch.arange(ny, device=self.device, dtype=self.dtype) * dy
         
-        # Transform velocity to Fourier space
-        u_hat = torch.fft.fftn(velocity, dim=(-2, -1))
+        # Classic Kolmogorov forcing: f_u = scale * sin(k * y), f_v = 0
+        # This exactly matches the JAX implementation
+        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * y_coords)
+        v_force = torch.zeros_like(u_force)
         
-        # Create forcing mask (only force large scales)
-        forcing_mask = (k_mag <= self.forcing_wavenumber).float()
-        # Remove DC component (k=0)
-        forcing_mask[k_mag < 1e-10] = 0.0
+        # Expand to match velocity tensor shape [batch, channels, y, x]
+        # u_force: [ny] -> [batch, 1, ny, nx]
+        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, ny, nx)
+        # v_force: [ny] -> [batch, 1, ny, nx]  
+        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, ny, nx)
         
-        # Compute energy injection amplitude
-        if self.target_energy_rate is not None:
-            # Adaptive forcing to maintain target energy injection rate
-            current_energy = self._compute_kinetic_energy(velocity)
-            amplitude = self._compute_adaptive_amplitude(current_energy)
+        # Combine force components
+        if n_channels == 2:  # 2D case
+            forcing_external = torch.cat([u_force, v_force], dim=1)
+        elif n_channels == 3:  # 3D case - add zero w-component
+            w_force = torch.zeros_like(u_force)
+            forcing_external = torch.cat([u_force, v_force, w_force], dim=1)
         else:
-            # Fixed amplitude forcing
-            amplitude = forcing_scale
+            raise ValueError(f"Unsupported number of velocity components: {n_channels}")
         
-        # Apply forcing in Fourier space
-        # f̂(k) = A(k) * û(k) for |k| ≤ k_f
-        forcing_amplitude = amplitude * forcing_mask.unsqueeze(0).unsqueeze(0)
-        f_hat = forcing_amplitude * u_hat
-        
-        # Transform back to physical space
-        forcing_spectral = torch.fft.ifftn(f_hat, dim=(-2, -1)).real
-        
-        # Add linear damping term: -λu (helps maintain energy balance)
-        forcing_total = forcing_spectral + linear_coefficient * velocity
+        # Add linear damping term: λ * velocity
+        # This matches JAX's linear_forcing implementation
+        forcing_total = forcing_external + linear_coefficient * velocity
         
         # Update energy tracking
         self._update_energy_tracking(velocity, forcing_total)
@@ -145,42 +147,46 @@ class KolmogorovForcing:
     
     def _compute_forcing_3d(self, velocity, forcing_scale, linear_coefficient):
         """
-        Compute 3D Kolmogorov forcing (similar to 2D but with z-dimension).
+        Compute 3D Kolmogorov forcing - Classic implementation matching JAX.
+        
+        Mathematical formulation (matching JAX cfd-ml for 3D):
+        f_u = scale * sin(k * y)  # External sinusoidal driving in u-component
+        f_v = 0                   # No external force in v-component
+        f_w = 0                   # No external force in w-component
+        f_total = [f_u, f_v, f_w] + λ * velocity  # Add linear damping
         """
         batch_size, n_channels, nz, ny, nx = velocity.shape
         
-        # Create 3D wavenumber grids
-        kz = torch.fft.fftfreq(nz, device=self.device, dtype=self.dtype)
-        ky = torch.fft.fftfreq(ny, device=self.device, dtype=self.dtype)
-        kx = torch.fft.fftfreq(nx, device=self.device, dtype=self.dtype)
-        KZ, KY, KX = torch.meshgrid(kz, ky, kx, indexing='ij')
-        k_mag = torch.sqrt(KX**2 + KY**2 + KZ**2)
+        # Create spatial coordinates (assuming domain [0, 2π * domain_scale])
+        domain_length = 2 * np.pi  # Standard domain for Kolmogorov forcing
+        dy = domain_length / ny
+        y_coords = torch.arange(ny, device=self.device, dtype=self.dtype) * dy
         
-        # Transform to Fourier space
-        u_hat = torch.fft.fftn(velocity, dim=(-3, -2, -1))
+        # Classic Kolmogorov forcing: f_u = scale * sin(k * y), f_v = f_w = 0
+        # This exactly matches the JAX implementation for 3D
+        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * y_coords)
+        v_force = torch.zeros_like(u_force)
+        w_force = torch.zeros_like(u_force)
         
-        # Create forcing mask
-        forcing_mask = (k_mag <= self.forcing_wavenumber).float()
-        forcing_mask[k_mag < 1e-10] = 0.0
+        # Expand to match velocity tensor shape [batch, channels, z, y, x]
+        # u_force: [ny] -> [batch, 1, nz, ny, nx]
+        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
+        # v_force: [ny] -> [batch, 1, nz, ny, nx]
+        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
+        # w_force: [ny] -> [batch, 1, nz, ny, nx]
+        w_force = w_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
         
-        # Compute amplitude
-        if self.target_energy_rate is not None:
-            current_energy = self._compute_kinetic_energy(velocity)
-            amplitude = self._compute_adaptive_amplitude(current_energy)
+        # Combine force components for 3D
+        if n_channels == 3:
+            forcing_external = torch.cat([u_force, v_force, w_force], dim=1)
         else:
-            amplitude = forcing_scale
+            raise ValueError(f"Expected 3 velocity components for 3D, got {n_channels}")
         
-        # Apply forcing
-        forcing_amplitude = amplitude * forcing_mask.unsqueeze(0).unsqueeze(0)
-        f_hat = forcing_amplitude * u_hat
+        # Add linear damping term: λ * velocity
+        # This matches JAX's linear_forcing implementation
+        forcing_total = forcing_external + linear_coefficient * velocity
         
-        # Transform back
-        forcing_spectral = torch.fft.ifftn(f_hat, dim=(-3, -2, -1)).real
-        
-        # Add linear damping
-        forcing_total = forcing_spectral + linear_coefficient * velocity
-        
-        # Update tracking
+        # Update energy tracking
         self._update_energy_tracking(velocity, forcing_total)
         
         return forcing_total.to(dtype=self.dtype)
