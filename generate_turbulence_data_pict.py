@@ -262,9 +262,9 @@ class TurbulenceDataGenerator:
         # Initialize Kolmogorov forcing if enabled
         if self.args.kolmogorov:
             self.kolmogorov_forcing = KolmogorovForcing(
-                forcing_scale=self.args.forcing_scale / self.args.cfl_safety_factor,
-                linear_coefficient=self.args.linear_coefficient / self.args.cfl_safety_factor,
-                forcing_wavenumber=self.args.peak_wavenumber / self.args.cfl_safety_factor,
+                forcing_scale=self.args.forcing_scale,
+                linear_coefficient=self.args.linear_coefficient,
+                forcing_wavenumber=self.args.peak_wavenumber,
                 target_energy_rate=getattr(args, 'target_energy_rate', None),
                 device=cuda_device,
                 dtype=self.dtype
