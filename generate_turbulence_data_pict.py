@@ -1095,7 +1095,7 @@ class TurbulenceDataGenerator:
         
 
     
-    def create_simulation(self, domain, time_step, log_interval, log_dir_name):
+    def create_simulation(self, domain, time_step, log_interval, log_dir_name, prep_fn={}):
         """Create a PISOtorch simulation instance with consistent settings"""
         log_dir = Path(self.args.save_dir) / log_dir_name
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1112,7 +1112,8 @@ class TurbulenceDataGenerator:
             visualize_max_steps=getattr(self.args, 'visualize_max_steps', None),
             log_interval=log_interval,
             log_dir=str(log_dir),
-            stop_fn=lambda: False
+            stop_fn=lambda: False,
+            prep_fn=prep_fn
         )
         
         return sim
@@ -1425,11 +1426,12 @@ class TurbulenceDataGenerator:
             # Calculate timesteps for this resolution
             timestep_info = self._calculate_simulation_timesteps(resolution, hr_training_timestep, initial_velocity)
             warmup_timestep, training_timestep, warmup_steps = timestep_info
-
+            
+            prep_fn = {}
             if self.args.kolmogorov:
-                prep_fn = {}
                 def pfn_set_forcing(domain, time_step, **kwargs):
-                    forcing = self.kolmogorov_forcing(domain.getBlock(0).velocity, self.args.forcing_scale, self.args.linear_coefficient)
+                    velocity = domain.getBlock(0).velocity
+                    forcing = self.kolmogorov_forcing(velocity, self.args.forcing_scale, self.args.linear_coefficient)
                     domain.getBlock(0).setVelocitySource(forcing)
                     domain.UpdateDomainData()
                 # register the callback: before each simulation step ("PRE") the simulation calls 'pfn_set_forcing'
@@ -1440,7 +1442,8 @@ class TurbulenceDataGenerator:
                 domain, 
                 warmup_timestep, 
                 max(warmup_steps // 10, 1), 
-                f"resolution_{resolution}_logs"
+                f"resolution_{resolution}_logs",
+                prep_fn=prep_fn
             )
             
             # Run warmup simulation
