@@ -1159,13 +1159,24 @@ class TurbulenceDataGenerator:
     def warmup_simulation(self, sim, resolution, warmup_steps):
         """Run warmup simulation to reach statistically steady state using existing simulation instance"""
         
-        # Storage for warmup trajectory data
-        warmup_trajectory = []
+        # Storage for warmup trajectory data - now stores both velocity and force
+        warmup_trajectory = {'velocity': [], 'force': []}
+        
+        # Check if force data is available (Kolmogorov forcing enabled)
+        has_forcing = getattr(self.args, 'kolmogorov', False)
         
         # Collect initial state
         domain = sim.domain
         initial_velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
-        warmup_trajectory.append(initial_velocity.copy())
+        warmup_trajectory['velocity'].append(initial_velocity.copy())
+        
+        # Get initial force field if Kolmogorov forcing is enabled
+        if has_forcing and domain.getBlock(0).hasVelocitySource():
+            initial_force = domain.getBlock(0).velocitySource.detach().cpu().numpy()
+            warmup_trajectory['force'].append(initial_force.copy())
+        else:
+            # Store zeros if no forcing
+            warmup_trajectory['force'].append(np.zeros_like(initial_velocity))
         
         # Run warmup and collect data at every step
         for step in range(warmup_steps):
@@ -1174,7 +1185,15 @@ class TurbulenceDataGenerator:
             
             # Collect velocity field after each step
             current_velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
-            warmup_trajectory.append(current_velocity.copy())
+            warmup_trajectory['velocity'].append(current_velocity.copy())
+            
+            # Get current force field if Kolmogorov forcing is enabled
+            if has_forcing and domain.getBlock(0).hasVelocitySource():
+                current_force = domain.getBlock(0).velocitySource.detach().cpu().numpy()
+                warmup_trajectory['force'].append(current_force.copy())
+            else:
+                # Store zeros if no forcing
+                warmup_trajectory['force'].append(np.zeros_like(current_velocity))
             
             # Memory management: save and clean every 1000 steps during warmup
             if (step + 1) % 100 == 0:
@@ -1182,13 +1201,13 @@ class TurbulenceDataGenerator:
                 print(f"Warmup step {step + 1} of {warmup_steps} ({percentage:.1f}%). ")
                 
                 # Save warmup data if we have enough
-                if len(warmup_trajectory) > 0:
-                    print(f"Saving warmup trajectory data at step {step + 1} with {len(warmup_trajectory)} time points...")
+                if len(warmup_trajectory['velocity']) > 0:
+                    print(f"Saving warmup trajectory data at step {step + 1} with {len(warmup_trajectory['velocity'])} time points...")
                     original_save_file = self.args.save_file
                     self.args.save_file = f"{original_save_file}_warmup_step{step + 1}"
                     
-                    self.save_trajectory_data(np.array(warmup_trajectory), resolution, self.args.training_timestep)
-                    warmup_trajectory = []  # Clear all warmup data to save memory
+                    self.save_trajectory_data(warmup_trajectory, resolution, self.args.training_timestep)
+                    warmup_trajectory = {'velocity': [], 'force': []}  # Clear all warmup data to save memory
                     self.args.save_file = original_save_file
                     
                     # Force garbage collection
@@ -1196,19 +1215,21 @@ class TurbulenceDataGenerator:
                     print("Warmup memory cleaned.")
         
         # Save final warmup data if any remains
-        if len(warmup_trajectory) > 0:
-            print(f"Saving final warmup trajectory data with {len(warmup_trajectory)} time points...")
+        if len(warmup_trajectory['velocity']) > 0:
+            print(f"Saving final warmup trajectory data with {len(warmup_trajectory['velocity'])} time points...")
             original_save_file = self.args.save_file
             self.args.save_file = f"{original_save_file}_warmup_final"
             
-            self.save_trajectory_data(np.array(warmup_trajectory), resolution, self.args.training_timestep)
+            self.save_trajectory_data(warmup_trajectory, resolution, self.args.training_timestep)
             self.args.save_file = original_save_file
             print("Final warmup data saved successfully.")
         
-        # Convert to numpy array (will be small or empty now)
-        warmup_trajectory = np.array(warmup_trajectory)
+        # Convert to numpy arrays for compatibility
+        warmup_trajectory['velocity'] = np.array(warmup_trajectory['velocity']) if warmup_trajectory['velocity'] else np.array([])
+        warmup_trajectory['force'] = np.array(warmup_trajectory['force']) if warmup_trajectory['force'] else np.array([])
         
-        print("Final warmup_trajectory.shape", warmup_trajectory.shape)
+        print("Final warmup_trajectory velocity shape:", warmup_trajectory['velocity'].shape)
+        print("Final warmup_trajectory force shape:", warmup_trajectory['force'].shape)
         return warmup_trajectory
     
 
@@ -1681,7 +1702,7 @@ class TurbulenceDataGenerator:
 
     
     def save_warmup_trajectory_data(self, warmup_trajectory, resolution, timestep=None):
-        """Save complete warmup trajectory data in one file"""
+        """Save complete warmup trajectory data in one file - now includes both velocity and force data"""
         save_dir = Path(self.args.save_dir) / "warmup_data" / str(resolution)
         save_dir.mkdir(parents=True, exist_ok=True)
         
@@ -1693,20 +1714,37 @@ class TurbulenceDataGenerator:
         # Save the complete warmup trajectory - ALL STEPS IN ONE FILE
         trajectory_file = save_dir / f"warmup_trajectory_{resolution}x{resolution}_index_{self.args.save_index}.npz"
         
-        num_timesteps = warmup_trajectory.shape[0]
+        # Handle both old format (numpy array) and new format (dict with velocity and force)
+        if isinstance(warmup_trajectory, dict):
+            velocity_data = warmup_trajectory['velocity']
+            force_data = warmup_trajectory['force']
+        else:
+            # Legacy compatibility - warmup_trajectory is just velocity data
+            velocity_data = warmup_trajectory
+            force_data = np.zeros_like(warmup_trajectory)  # Create zero force data
+        
+        num_timesteps = velocity_data.shape[0]
         time_array = np.arange(num_timesteps) * timestep
         
         # Extract velocity components for complete trajectory
-        if warmup_trajectory.shape[2] == 3:  # 3D
-            u_data = warmup_trajectory[:, 0, 0, :, :, :]  # x-velocity
-            v_data = warmup_trajectory[:, 0, 1, :, :, :]  # y-velocity  
-            w_data = warmup_trajectory[:, 0, 2, :, :, :]  # z-velocity
+        if velocity_data.shape[2] == 3:  # 3D
+            u_data = velocity_data[:, 0, 0, :, :, :]  # x-velocity
+            v_data = velocity_data[:, 0, 1, :, :, :]  # y-velocity  
+            w_data = velocity_data[:, 0, 2, :, :, :]  # z-velocity
+            
+            # Extract force components
+            fu_data = force_data[:, 0, 0, :, :, :]  # x-force
+            fv_data = force_data[:, 0, 1, :, :, :]  # y-force  
+            fw_data = force_data[:, 0, 2, :, :, :]  # z-force
             
             np.savez_compressed(
                 trajectory_file,
                 u=u_data,
                 v=v_data,
                 w=w_data,
+                fu=fu_data,  # Add force data
+                fv=fv_data,
+                fw=fw_data,
                 time_array=time_array,
                 delta_t=timestep,
                 total_time=self.args.warmup_time,
@@ -1719,16 +1757,25 @@ class TurbulenceDataGenerator:
                 dims=3,
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
-                peak_wavenumber=self.args.peak_wavenumber
+                peak_wavenumber=self.args.peak_wavenumber,
+                kolmogorov_forcing=getattr(self.args, 'kolmogorov', False),
+                forcing_scale=getattr(self.args, 'forcing_scale', 0.0),
+                linear_coefficient=getattr(self.args, 'linear_coefficient', 0.0)
             )
         else:  # 2D
-            u_data = warmup_trajectory[:, 0, 0, :, :]  # x-velocity
-            v_data = warmup_trajectory[:, 0, 1, :, :]  # y-velocity
+            u_data = velocity_data[:, 0, 0, :, :]  # x-velocity
+            v_data = velocity_data[:, 0, 1, :, :]  # y-velocity
+            
+            # Extract force components
+            fu_data = force_data[:, 0, 0, :, :]  # x-force
+            fv_data = force_data[:, 0, 1, :, :]  # y-force
             
             np.savez_compressed(
                 trajectory_file,
                 u=u_data,
                 v=v_data,
+                fu=fu_data,  # Add force data
+                fv=fv_data,
                 time_array=time_array,
                 delta_t=timestep,
                 total_time=self.args.warmup_time,
@@ -1741,10 +1788,17 @@ class TurbulenceDataGenerator:
                 dims=2,
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
-                peak_wavenumber=self.args.peak_wavenumber
+                peak_wavenumber=self.args.peak_wavenumber,
+                kolmogorov_forcing=getattr(self.args, 'kolmogorov', False),
+                forcing_scale=getattr(self.args, 'forcing_scale', 0.0),
+                linear_coefficient=getattr(self.args, 'linear_coefficient', 0.0)
             )
         
         self.logger.info(f"Saved complete warmup trajectory: {trajectory_file}")
+        if isinstance(warmup_trajectory, dict):
+            self.logger.info(f"  - Velocity data shape: {velocity_data.shape}")
+            self.logger.info(f"  - Force data shape: {force_data.shape}")
+            self.logger.info(f"  - Kolmogorov forcing enabled: {getattr(self.args, 'kolmogorov', False)}")
 
 
 def main():
