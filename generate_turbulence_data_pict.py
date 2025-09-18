@@ -1016,7 +1016,13 @@ class TurbulenceDataGenerator:
                     original_save_file = self.args.save_file
                     self.args.save_file = f"{original_save_file}_step{step}"
                     
-                    self.save_trajectory_data(trajectory_data, resolution, self.args.training_timestep)
+                    # Convert lists to numpy arrays before saving
+                    data_to_save = {
+                        'velocity': np.array(trajectory_data['velocity']),
+                        'force': np.array(trajectory_data['force'])
+                    }
+                    
+                    self.save_trajectory_data(data_to_save, resolution, self.args.training_timestep)
                     trajectory_data = {'velocity': [], 'force': []}
                     self.args.save_file = original_save_file
                     
@@ -1043,7 +1049,13 @@ class TurbulenceDataGenerator:
             original_save_file = self.args.save_file
             self.args.save_file = f"{original_save_file}_final"
             
-            self.save_trajectory_data(trajectory_data, resolution, self.args.training_timestep)
+            # Convert lists to numpy arrays before saving
+            data_to_save = {
+                'velocity': np.array(trajectory_data['velocity']),
+                'force': np.array(trajectory_data['force'])
+            }
+            
+            self.save_trajectory_data(data_to_save, resolution, self.args.training_timestep)
             self.args.save_file = original_save_file
         
             
@@ -1206,7 +1218,13 @@ class TurbulenceDataGenerator:
                     original_save_file = self.args.save_file
                     self.args.save_file = f"{original_save_file}_warmup_step{step + 1}"
                     
-                    self.save_trajectory_data(warmup_trajectory, resolution, self.args.training_timestep)
+                    # Convert lists to numpy arrays before saving
+                    warmup_data_to_save = {
+                        'velocity': np.array(warmup_trajectory['velocity']),
+                        'force': np.array(warmup_trajectory['force'])
+                    }
+                    
+                    self.save_trajectory_data(warmup_data_to_save, resolution, self.args.training_timestep)
                     warmup_trajectory = {'velocity': [], 'force': []}  # Clear all warmup data to save memory
                     self.args.save_file = original_save_file
                     
@@ -1220,7 +1238,13 @@ class TurbulenceDataGenerator:
             original_save_file = self.args.save_file
             self.args.save_file = f"{original_save_file}_warmup_final"
             
-            self.save_trajectory_data(warmup_trajectory, resolution, self.args.training_timestep)
+            # Convert lists to numpy arrays before saving
+            warmup_data_to_save = {
+                'velocity': np.array(warmup_trajectory['velocity']),
+                'force': np.array(warmup_trajectory['force'])
+            }
+            
+            self.save_trajectory_data(warmup_data_to_save, resolution, self.args.training_timestep)
             self.args.save_file = original_save_file
             print("Final warmup data saved successfully.")
         
