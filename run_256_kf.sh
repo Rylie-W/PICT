@@ -14,7 +14,7 @@ python generate_turbulence_data_pict.py \
     --warmup_time 40.0 \
     --max_velocity 7.0 \
     --viscosity 1e-3 \
-    --peak_wavenumber 2 \
+    --peak_wavenumber 4 \
     --cfl_safety_factor 0.5 \
     --integral_scale_factor 3.0 \
     --taylor_reynolds 20.0 \
