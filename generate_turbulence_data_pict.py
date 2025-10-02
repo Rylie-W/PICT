@@ -1509,6 +1509,7 @@ class TurbulenceDataGenerator:
             # Calculate timesteps for this resolution
             timestep_info = self._calculate_simulation_timesteps(resolution, hr_training_timestep, initial_velocity)
             warmup_timestep, training_timestep, warmup_steps = timestep_info
+            print(f"Warmup timestep: {warmup_timestep}, Training timestep: {training_timestep}, Warmup steps: {warmup_steps}")
             
             prep_fn = {}
             if self.args.kolmogorov:
