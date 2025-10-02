@@ -98,34 +98,34 @@ class KolmogorovForcing:
     
     def _compute_forcing_2d(self, velocity, forcing_scale, linear_coefficient):
         """
-        Compute 2D Kolmogorov forcing - Modified to match training data pattern.
+        Compute 2D Kolmogorov forcing - Classic implementation.
         
-        Mathematical formulation (matching training data):
-        f_u = scale * sin(k * x)  # External sinusoidal driving in u-component (x-direction)
+        Mathematical formulation:
+        f_u = scale * sin(k * y)  # External sinusoidal driving in u-component (y-direction)
         f_v = 0                   # No external force in v-component  
         f_total = [f_u, f_v] + λ * velocity  # Add linear damping
         
-        This matches the training data pattern:
-        u_force = scale * sin(k * x)  # Vertical stripes (varies in x)
+        This creates horizontal stripes in the force field:
+        u_force = scale * sin(k * y)  # Horizontal stripes (varies in y)
         v_force = 0
         """
         batch_size, n_channels, ny, nx = velocity.shape
         
         # Create spatial coordinates (assuming domain [0, 2π * domain_scale])
         domain_length = 2 * np.pi  # Standard domain for Kolmogorov forcing
-        dx = domain_length / nx  # Use x-direction spacing instead of y
-        x_coords = torch.arange(nx, device=self.device, dtype=self.dtype) * dx
+        dy = domain_length / ny  # Use y-direction spacing
+        y_coords = torch.arange(ny, device=self.device, dtype=self.dtype) * dy
         
-        # Modified Kolmogorov forcing to match training data: f_u = scale * sin(k * x), f_v = 0
-        # This creates vertical stripes in the force field
-        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * x_coords)
+        # Classic Kolmogorov forcing: f_u = scale * sin(k * y), f_v = 0
+        # This creates horizontal stripes in the force field
+        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * y_coords)
         v_force = torch.zeros_like(u_force)
         
         # Expand to match velocity tensor shape [batch, channels, y, x]
-        # u_force: [nx] -> [batch, 1, ny, nx]
-        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, 1, ny, nx)
-        # v_force: [nx] -> [batch, 1, ny, nx]  
-        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, 1, ny, nx)
+        # u_force: [ny] -> [batch, 1, ny, nx]
+        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, ny, nx)
+        # v_force: [ny] -> [batch, 1, ny, nx]  
+        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, ny, nx)
         
         # Combine force components
         if n_channels == 2:  # 2D case
@@ -147,10 +147,10 @@ class KolmogorovForcing:
     
     def _compute_forcing_3d(self, velocity, forcing_scale, linear_coefficient):
         """
-        Compute 3D Kolmogorov forcing - Modified to match training data pattern.
+        Compute 3D Kolmogorov forcing - Classic implementation.
         
-        Mathematical formulation (matching training data for 3D):
-        f_u = scale * sin(k * x)  # External sinusoidal driving in u-component (x-direction)
+        Mathematical formulation:
+        f_u = scale * sin(k * y)  # External sinusoidal driving in u-component (y-direction)
         f_v = 0                   # No external force in v-component
         f_w = 0                   # No external force in w-component
         f_total = [f_u, f_v, f_w] + λ * velocity  # Add linear damping
@@ -159,22 +159,22 @@ class KolmogorovForcing:
         
         # Create spatial coordinates (assuming domain [0, 2π * domain_scale])
         domain_length = 2 * np.pi  # Standard domain for Kolmogorov forcing
-        dx = domain_length / nx  # Use x-direction spacing instead of y
-        x_coords = torch.arange(nx, device=self.device, dtype=self.dtype) * dx
+        dy = domain_length / ny  # Use y-direction spacing
+        y_coords = torch.arange(ny, device=self.device, dtype=self.dtype) * dy
         
-        # Modified Kolmogorov forcing to match training data: f_u = scale * sin(k * x), f_v = f_w = 0
-        # This creates vertical stripes in the force field
-        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * x_coords)
+        # Classic Kolmogorov forcing: f_u = scale * sin(k * y), f_v = f_w = 0
+        # This creates horizontal stripes in the force field
+        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * y_coords)
         v_force = torch.zeros_like(u_force)
         w_force = torch.zeros_like(u_force)
         
         # Expand to match velocity tensor shape [batch, channels, z, y, x]
-        # u_force: [nx] -> [batch, 1, nz, ny, nx]
-        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, 1, nz, ny, nx)
-        # v_force: [nx] -> [batch, 1, nz, ny, nx]
-        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, 1, nz, ny, nx)
-        # w_force: [nx] -> [batch, 1, nz, ny, nx]
-        w_force = w_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(batch_size, 1, nz, ny, nx)
+        # u_force: [ny] -> [batch, 1, nz, ny, nx]
+        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
+        # v_force: [ny] -> [batch, 1, nz, ny, nx]
+        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
+        # w_force: [ny] -> [batch, 1, nz, ny, nx]
+        w_force = w_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
         
         # Combine force components for 3D
         if n_channels == 3:
