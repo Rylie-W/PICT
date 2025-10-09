@@ -1,3 +1,9 @@
+To generate decaying turbulence data, run
+```python
+python generate_turbulence_data_pict.py
+```
+
+
 
 ![PICT logo](images/banner.png)
 
