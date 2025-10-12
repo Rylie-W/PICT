@@ -82,10 +82,10 @@ class TurbulenceExperimentGenerator:
     def create_domain(self, resolution: int) -> Tuple[PISOtorch.Domain, PISOtorch.Block]:
         """Create a 2D periodic domain for turbulence simulation."""
         
-        # Create viscosity tensor
-        viscosity = torch.tensor([self.viscosity], dtype=self.dtype, device=self.device)
+        # Create viscosity tensor on CPU (PISOtorch requirement)
+        viscosity = torch.tensor([self.viscosity], dtype=self.dtype, device='cpu')
         
-        # Create domain
+        # Create domain (will be moved to GPU internally by PISOtorch)
         domain = PISOtorch.Domain(
             2,  # 2D
             viscosity,
