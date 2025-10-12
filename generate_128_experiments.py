@@ -26,6 +26,13 @@ import json
 from typing import List, Tuple, Optional
 import gc
 
+# Set multiprocessing start method to 'spawn' for CUDA compatibility
+# This must be done before any CUDA operations
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # Already set
+
 # Add project root to path
 sys.path.append(str(Path(__file__).parent))
 
@@ -376,6 +383,12 @@ def save_experiment_data(experiment_data: dict, save_dir: Path):
 def main():
     """Main function to generate 128 turbulence experiments."""
     
+    # Ensure spawn method is set (redundant but safe)
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+    
     parser = argparse.ArgumentParser(description='Generate 128 turbulence experiments')
     
     # Physical parameters
@@ -499,4 +512,5 @@ def main():
     logger.info(f"Summary saved to: {summary_file}")
 
 if __name__ == "__main__":
+    # This guard is required for multiprocessing with 'spawn' method
     main()
