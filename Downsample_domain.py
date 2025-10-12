@@ -10,7 +10,6 @@ from scipy.interpolate import griddata
 from lib.data import shapes
 import PISOtorch
 from lib.util import domain_io
-import config
 from DomainManager import BFSDomainManager,KarmanDomainManager
 import PISOtorch_simulation
 
@@ -347,22 +346,3 @@ def downsample_save_domain(run_id, Re, time_range=(0, None)):
     #         new_path = create_new_paths(path)
     #         domain_io.save_domain(down_domain, new_path)
     #         print(f"Downsampled domain saved to {new_path}")
-
-if __name__ == "__main__":
-    # run_id="241301-203319"
-    # Re=1300
-    # time_range=[3901,4500]
-    # # time_range=[3300,3900]
-    # params= config.BFSSimParams(Re=Re, s=0.875, downsample_factor=4/1)
-    # dtype=params.dtype
-    # cuda_device=torch.device("cuda")
-    # domain_manager = BFSDomainManager(**params.__dict__)
-    # downsample_save_domain(run_id, Re, time_range)
-    run_id = "241230-234838"
-    task = "Karman"
-    Re=600
-    time_range=[1201,2000]
-    params= config.KarmanSimParams(Re=Re, y_in=2.0, downsample_factor=4/2)
-    dtype=params.dtype
-    domain_manager = KarmanDomainManager(**params.__dict__)
-    downsample_save_domain(run_id, Re, time_range)
