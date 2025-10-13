@@ -1,10 +1,9 @@
 # this function is for downsampling domain
 import glob, re, os
-cudaID = '3'
-# cudaID = cudaID or str(get_available_GPU_id(active_mem_threshold=0.8, default=None))
-os.environ["CUDA_VISIBLE_DEVICES"] = cudaID
+# CUDA device is now managed by the calling script
+# Do not set CUDA_VISIBLE_DEVICES here to allow multi-GPU usage
 import torch
-cuda_device = torch.device("cuda")
+cuda_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 import numpy as np
 from scipy.interpolate import griddata
 from lib.data import shapes

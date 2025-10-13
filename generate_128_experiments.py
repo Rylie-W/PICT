@@ -133,7 +133,7 @@ class TurbulenceExperimentGenerator:
         return velocity
     
     def _generate_divergence_free_field(self, shape: List[int]) -> torch.Tensor:
-        """Generate divergence-free velocity field using streamfunction method."""
+        """Generate divergence-free velocity field using improved von Karman spectrum with visible vortex structures."""
         
         ny, nx = shape[2], shape[3]
         
@@ -146,8 +146,14 @@ class TurbulenceExperimentGenerator:
         # Domain size and length scale parameters
         domain_size = max(ny, nx)
         integral_scale_factor = 6.0
+        Re_lambda = 50.0  # Taylor microscale Reynolds number
+        
         L_integral = domain_size / integral_scale_factor
         k0 = 1.0 / L_integral
+        
+        # Control dissipation scale (KEY IMPROVEMENT for visible vortex structures)
+        eta_over_L = Re_lambda**(-3/4)
+        k_eta = 1.0 / (eta_over_L * L_integral)
         
         # Create random streamfunction in Fourier space
         streamfunction_fft = torch.complex(
@@ -155,12 +161,29 @@ class TurbulenceExperimentGenerator:
             torch.randn(ny, nx, device=self.device)
         )
         
-        # Von Karman spectrum for 2D turbulence
+        # Improved Von Karman spectrum for 2D turbulence
         k_over_k0 = k_mag / k0
+        k_over_keta = k_mag / k_eta
+        
+        # Base Von Karman spectrum
         energy_spectrum = (k_over_k0**4) / (1 + k_over_k0**2)**(17/6)
+        
+        # Add exponential cutoff at dissipation scale (CRITICAL: suppresses small scales = noise)
+        energy_spectrum *= torch.exp(-2.0 * k_over_keta**2)
+        
+        # Normalize to ensure reasonable energy levels (CRITICAL: emphasizes large scales = vortices)
+        k_peak_theory = k0 * (4.0/13.0)**(1/2)
+        peak_mask = (k_mag >= k_peak_theory * 0.8) & (k_mag <= k_peak_theory * 1.2)
+        if torch.any(peak_mask):
+            energy_spectrum = energy_spectrum / torch.max(energy_spectrum[peak_mask])
         
         # Remove DC component
         energy_spectrum[k_mag < 1e-10] = 0
+        
+        # Apply smoothing near k=0 to avoid numerical issues (CRITICAL: smooth large-scale transitions)
+        k_smooth = k0 / 10.0
+        smooth_factor = torch.tanh(k_mag / k_smooth)
+        energy_spectrum *= smooth_factor
         
         # Apply spectrum
         streamfunction_fft *= torch.sqrt(energy_spectrum)
