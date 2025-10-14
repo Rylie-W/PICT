@@ -133,7 +133,14 @@ class TurbulenceExperimentGenerator:
         return velocity
     
     def _generate_divergence_free_field(self, shape: List[int]) -> torch.Tensor:
-        """Generate divergence-free velocity field using improved von Karman spectrum with visible vortex structures."""
+        """
+        Generate divergence-free velocity field with LARGE VISIBLE VORTEX STRUCTURES.
+        
+        Key parameters for vortex size control:
+        - integral_scale_factor: SMALLER = LARGER vortices (2.0 = very large, 6.0 = small)
+        - dissipation_cutoff_strength: LARGER = CLEARER vortices (more small-scale suppression)
+        - Re_lambda: SMALLER = LESS noise (fewer small-scale structures)
+        """
         
         ny, nx = shape[2], shape[3]
         
@@ -143,15 +150,29 @@ class TurbulenceExperimentGenerator:
         KY, KX = torch.meshgrid(ky, kx, indexing='ij')
         k_mag = torch.sqrt(KX**2 + KY**2)
         
-        # Domain size and length scale parameters
+        # ========== TUNABLE PARAMETERS FOR VORTEX SIZE ==========
         domain_size = max(ny, nx)
-        integral_scale_factor = 6.0
-        Re_lambda = 50.0  # Taylor microscale Reynolds number
+        
+        # Parameter 1: Integral scale (MOST IMPORTANT for vortex size)
+        # Smaller value = larger vortices
+        # Recommended range: 2.0-6.0
+        integral_scale_factor = 2.5  # OPTIMAL: large, visible vortices
+        
+        # Parameter 2: Taylor Reynolds number (controls small-scale turbulence)
+        # Smaller value = less noise, clearer vortices
+        # Recommended range: 20-60
+        Re_lambda = 25.0  # OPTIMAL: minimal noise
+        
+        # Parameter 3: Dissipation cutoff strength
+        # Larger value = more aggressive small-scale suppression
+        # Recommended range: 2.0-5.0
+        dissipation_cutoff_strength = 4.0  # OPTIMAL: clear vortex edges
+        # ========================================================
         
         L_integral = domain_size / integral_scale_factor
         k0 = 1.0 / L_integral
         
-        # Control dissipation scale (KEY IMPROVEMENT for visible vortex structures)
+        # Control dissipation scale
         eta_over_L = Re_lambda**(-3/4)
         k_eta = 1.0 / (eta_over_L * L_integral)
         
@@ -168,10 +189,10 @@ class TurbulenceExperimentGenerator:
         # Base Von Karman spectrum
         energy_spectrum = (k_over_k0**4) / (1 + k_over_k0**2)**(17/6)
         
-        # Add exponential cutoff at dissipation scale (CRITICAL: suppresses small scales = noise)
-        energy_spectrum *= torch.exp(-2.0 * k_over_keta**2)
+        # Add exponential cutoff at dissipation scale (CRITICAL: suppresses small scales)
+        energy_spectrum *= torch.exp(-dissipation_cutoff_strength * k_over_keta**2)
         
-        # Normalize to ensure reasonable energy levels (CRITICAL: emphasizes large scales = vortices)
+        # Normalize to ensure reasonable energy levels (CRITICAL: emphasizes large scales)
         k_peak_theory = k0 * (4.0/13.0)**(1/2)
         peak_mask = (k_mag >= k_peak_theory * 0.8) & (k_mag <= k_peak_theory * 1.2)
         if torch.any(peak_mask):
@@ -180,7 +201,7 @@ class TurbulenceExperimentGenerator:
         # Remove DC component
         energy_spectrum[k_mag < 1e-10] = 0
         
-        # Apply smoothing near k=0 to avoid numerical issues (CRITICAL: smooth large-scale transitions)
+        # Apply smoothing near k=0 for smooth large-scale transitions
         k_smooth = k0 / 10.0
         smooth_factor = torch.tanh(k_mag / k_smooth)
         energy_spectrum *= smooth_factor
