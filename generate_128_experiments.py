@@ -551,7 +551,7 @@ def main():
         gpu_experiments = sum(1 for _, gid, _ in experiment_args if gid == gpu_id)
         logger.info(f"GPU {gpu_id}: {gpu_experiments} experiments")
     
-    # Run experiments in parallel - one process per GPU for proper CUDA_VISIBLE_DEVICES isolation
+    # Run experiments in parallel using subprocess for proper CUDA_VISIBLE_DEVICES isolation
     # Group experiments by GPU
     experiments_by_gpu = {}
     for exp_id, gpu_id, exp_args in experiment_args:
@@ -559,26 +559,64 @@ def main():
             experiments_by_gpu[gpu_id] = []
         experiments_by_gpu[gpu_id].append((exp_id, gpu_id, exp_args))
     
-    logger.info(f"Running experiments with {num_gpus} GPU-specific worker processes")
+    logger.info(f"Running experiments with {num_gpus} GPU-specific subprocess workers")
     
     start_time = time.time()
     successful_experiments = 0
     failed_experiments = 0
     
-    # Use one process per GPU to ensure proper CUDA_VISIBLE_DEVICES isolation
-    all_futures = []
+    # Create temporary directory for inter-process communication
+    import tempfile
+    import pickle
+    import subprocess
     
-    with ProcessPoolExecutor(max_workers=num_gpus) as executor:
-        # Submit one batch of experiments per GPU
-        for gpu_id, gpu_experiments in experiments_by_gpu.items():
-            # Submit all experiments for this GPU as a single batch
-            future = executor.submit(run_gpu_experiments_batch, gpu_id, gpu_experiments)
-            all_futures.append((future, gpu_id, gpu_experiments))
+    temp_dir = Path(tempfile.mkdtemp(prefix='pict_experiments_'))
+    logger.info(f"Using temporary directory: {temp_dir}")
+    
+    # Save main args
+    args_file = temp_dir / "main_args.pkl"
+    with open(args_file, 'wb') as f:
+        pickle.dump(args, f)
+    
+    # Launch subprocess for each GPU
+    processes = []
+    for gpu_id, gpu_experiments in experiments_by_gpu.items():
+        # Save experiments list for this GPU
+        exp_file = temp_dir / f"gpu_{gpu_id}_experiments.pkl"
+        with open(exp_file, 'wb') as f:
+            pickle.dump(gpu_experiments, f)
         
-        # Wait for all GPUs to complete
-        for future, gpu_id, gpu_experiments in all_futures:
+        # Launch subprocess with CUDA_VISIBLE_DEVICES set
+        script_path = Path(__file__).parent / "run_single_gpu_experiments.py"
+        cmd = [
+            sys.executable,
+            str(script_path),
+            '--gpu_id', str(gpu_id),
+            '--experiments_file', str(exp_file),
+            '--args_file', str(args_file)
+        ]
+        
+        env = os.environ.copy()
+        env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        
+        logger.info(f"Launching subprocess for GPU {gpu_id} with {len(gpu_experiments)} experiments")
+        proc = subprocess.Popen(cmd, env=env)
+        processes.append((gpu_id, proc, exp_file, len(gpu_experiments)))
+    
+    # Wait for all subprocesses to complete
+    for gpu_id, proc, exp_file, num_exp in processes:
+        logger.info(f"Waiting for GPU {gpu_id} subprocess to complete...")
+        proc.wait()
+        
+        if proc.returncode != 0:
+            logger.error(f"GPU {gpu_id} subprocess failed with return code {proc.returncode}")
+            failed_experiments += num_exp
+        else:
+            # Load results
+            results_file = str(exp_file).replace('_experiments.pkl', '_results.pkl')
             try:
-                results = future.result()
+                with open(results_file, 'rb') as f:
+                    results = pickle.load(f)
                 
                 for result in results:
                     if result.get('success', True):
@@ -590,10 +628,14 @@ def main():
                         failed_experiments += 1
                         exp_id = result.get('experiment_id', 'unknown')
                         logger.error(f"Failed experiment {exp_id}")
-                        
             except Exception as e:
-                failed_experiments += len(gpu_experiments)
-                logger.error(f"Exception in GPU {gpu_id} experiments: {str(e)}")
+                logger.error(f"Failed to load results from GPU {gpu_id}: {e}")
+                failed_experiments += num_exp
+    
+    # Cleanup temp directory
+    import shutil
+    shutil.rmtree(temp_dir)
+    logger.info(f"Cleaned up temporary directory: {temp_dir}")
     
     # Summary
     total_time = time.time() - start_time
