@@ -288,7 +288,10 @@ class TurbulenceExperimentGenerator:
             domain_io.save_domain(lr_domain, str(initial_save_path))
             logger.info(f"Experiment {self.experiment_id}: Saved initial condition to {initial_save_path}")
             
-            # Create simulation
+            # Create simulation with log directory
+            log_dir = exp_dir / f"simulation_logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            
             sim = PISOtorch_simulation.Simulation(
                 domain=hr_domain,
                 time_step=dt,
@@ -299,7 +302,7 @@ class TurbulenceExperimentGenerator:
                 velocity_corrector="FD",
                 adaptive_CFL=self.cfl_target,
                 log_interval=1000,
-                log_dir=None,
+                log_dir=str(log_dir),  # Must provide a valid directory
                 stop_fn=lambda: False
             )
             
