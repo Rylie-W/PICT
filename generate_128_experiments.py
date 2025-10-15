@@ -58,9 +58,14 @@ class TurbulenceExperimentGenerator:
         self.args = args
         self.dtype = torch.float32
         
-        # Set GPU
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Set GPU device (use torch.cuda.set_device instead of CUDA_VISIBLE_DEVICES in multiprocessing)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(gpu_id)
+            self.device = torch.device(f"cuda:{gpu_id}")
+            logger.info(f"Experiment {experiment_id}: Using GPU {gpu_id} (cuda:{gpu_id})")
+        else:
+            self.device = torch.device("cpu")
+            logger.warning(f"Experiment {experiment_id}: CUDA not available, using CPU")
         
         # Physical parameters
         self.domain_size = 2 * np.pi * self.args.domain_scale
@@ -76,8 +81,6 @@ class TurbulenceExperimentGenerator:
         # Grid parameters
         self.hr_resolution = 2048  # High resolution
         self.lr_resolution = 512    # Low resolution (downsampled)
-        
-        logger.info(f"Experiment {experiment_id}: GPU {gpu_id}, HR={self.hr_resolution}, LR={self.lr_resolution}")
     
     def create_domain(self, resolution: int) -> Tuple[PISOtorch.Domain, PISOtorch.Block]:
         """Create a 2D periodic domain for turbulence simulation."""
