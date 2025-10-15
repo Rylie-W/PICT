@@ -58,11 +58,12 @@ class TurbulenceExperimentGenerator:
         self.args = args
         self.dtype = torch.float32
         
-        # Set GPU device (use torch.cuda.set_device instead of CUDA_VISIBLE_DEVICES in multiprocessing)
+        # Set GPU device
+        # Note: CUDA_VISIBLE_DEVICES is set in run_single_experiment before this init
+        # So the child process only sees one GPU (cuda:0), even though physically it might be GPU 1, 2, or 3
         if torch.cuda.is_available():
-            torch.cuda.set_device(gpu_id)
-            self.device = torch.device(f"cuda:{gpu_id}")
-            logger.info(f"Experiment {experiment_id}: Using GPU {gpu_id} (cuda:{gpu_id})")
+            self.device = torch.device("cuda:0")  # Always cuda:0 because CUDA_VISIBLE_DEVICES limits visibility
+            logger.info(f"Experiment {experiment_id}: Assigned to physical GPU {gpu_id}, using cuda:0 in isolated process")
         else:
             self.device = torch.device("cpu")
             logger.warning(f"Experiment {experiment_id}: CUDA not available, using CPU")
@@ -400,6 +401,11 @@ class TurbulenceExperimentGenerator:
 def run_single_experiment(args_tuple):
     """Wrapper function for running single experiment in multiprocessing."""
     experiment_id, gpu_id, args = args_tuple
+    
+    # CRITICAL: Set CUDA_VISIBLE_DEVICES in child process before any CUDA operations
+    # This must be done BEFORE creating TurbulenceExperimentGenerator
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
     generator = TurbulenceExperimentGenerator(experiment_id, gpu_id, args)
     return generator.run_simulation()
 
