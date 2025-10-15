@@ -156,7 +156,7 @@ class TurbulenceExperimentGenerator:
         # Parameter 1: Integral scale (MOST IMPORTANT for vortex size)
         # Smaller value = larger vortices
         # Recommended range: 2.0-6.0
-        integral_scale_factor = 2.5  # OPTIMAL: large, visible vortices
+        integral_scale_factor = 2.0  # OPTIMAL: large, visible vortices
         
         # Parameter 2: Taylor Reynolds number (controls small-scale turbulence)
         # Smaller value = less noise, clearer vortices
