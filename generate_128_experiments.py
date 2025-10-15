@@ -402,12 +402,43 @@ def run_single_experiment(args_tuple):
     """Wrapper function for running single experiment in multiprocessing."""
     experiment_id, gpu_id, args = args_tuple
     
-    # CRITICAL: Set CUDA_VISIBLE_DEVICES in child process before any CUDA operations
-    # This must be done BEFORE creating TurbulenceExperimentGenerator
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
-    
+    # Note: CUDA_VISIBLE_DEVICES should already be set by run_gpu_experiments_batch
     generator = TurbulenceExperimentGenerator(experiment_id, gpu_id, args)
     return generator.run_simulation()
+
+def run_gpu_experiments_batch(gpu_id, experiments):
+    """
+    Run all experiments for a specific GPU in a single process.
+    This ensures proper CUDA_VISIBLE_DEVICES isolation.
+    
+    Args:
+        gpu_id: Physical GPU ID to use
+        experiments: List of (experiment_id, gpu_id, args) tuples for this GPU
+    
+    Returns:
+        List of experiment results
+    """
+    # CRITICAL: Set CUDA_VISIBLE_DEVICES before ANY PyTorch/CUDA operations
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    
+    logger.info(f"GPU {gpu_id} worker: Starting {len(experiments)} experiments with CUDA_VISIBLE_DEVICES={gpu_id}")
+    
+    results = []
+    for experiment_id, gpu_id, args in experiments:
+        try:
+            generator = TurbulenceExperimentGenerator(experiment_id, gpu_id, args)
+            result = generator.run_simulation()
+            results.append(result)
+        except Exception as e:
+            logger.error(f"GPU {gpu_id} worker: Exception in experiment {experiment_id}: {str(e)}")
+            results.append({
+                'experiment_id': experiment_id,
+                'success': False,
+                'error': str(e)
+            })
+    
+    logger.info(f"GPU {gpu_id} worker: Completed {len(experiments)} experiments")
+    return results
 
 def detect_available_gpus() -> List[int]:
     """Detect all available GPUs using nvidia-smi or torch cuda device count."""
@@ -520,39 +551,49 @@ def main():
         gpu_experiments = sum(1 for _, gid, _ in experiment_args if gid == gpu_id)
         logger.info(f"GPU {gpu_id}: {gpu_experiments} experiments")
     
-    # Run experiments in parallel
-    max_workers = args.max_workers or min(num_gpus, mp.cpu_count())
-    logger.info(f"Running experiments with {max_workers} parallel workers")
+    # Run experiments in parallel - one process per GPU for proper CUDA_VISIBLE_DEVICES isolation
+    # Group experiments by GPU
+    experiments_by_gpu = {}
+    for exp_id, gpu_id, exp_args in experiment_args:
+        if gpu_id not in experiments_by_gpu:
+            experiments_by_gpu[gpu_id] = []
+        experiments_by_gpu[gpu_id].append((exp_id, gpu_id, exp_args))
+    
+    logger.info(f"Running experiments with {num_gpus} GPU-specific worker processes")
     
     start_time = time.time()
     successful_experiments = 0
     failed_experiments = 0
     
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all experiments
-        future_to_experiment = {
-            executor.submit(run_single_experiment, exp_args): exp_args[0] 
-            for exp_args in experiment_args
-        }
+    # Use one process per GPU to ensure proper CUDA_VISIBLE_DEVICES isolation
+    all_futures = []
+    
+    with ProcessPoolExecutor(max_workers=num_gpus) as executor:
+        # Submit one batch of experiments per GPU
+        for gpu_id, gpu_experiments in experiments_by_gpu.items():
+            # Submit all experiments for this GPU as a single batch
+            future = executor.submit(run_gpu_experiments_batch, gpu_id, gpu_experiments)
+            all_futures.append((future, gpu_id, gpu_experiments))
         
-        # Process completed experiments
-        for future in as_completed(future_to_experiment):
-            experiment_id = future_to_experiment[future]
-            
+        # Wait for all GPUs to complete
+        for future, gpu_id, gpu_experiments in all_futures:
             try:
-                result = future.result()
+                results = future.result()
                 
-                if result.get('success', True):
-                    save_experiment_data(result, save_dir)
-                    successful_experiments += 1
-                    logger.info(f"Completed experiment {experiment_id} ({successful_experiments}/{num_experiments})")
-                else:
-                    failed_experiments += 1
-                    logger.error(f"Failed experiment {experiment_id}")
-                
+                for result in results:
+                    if result.get('success', True):
+                        save_experiment_data(result, save_dir)
+                        successful_experiments += 1
+                        exp_id = result['experiment_id']
+                        logger.info(f"Completed experiment {exp_id} ({successful_experiments}/{num_experiments})")
+                    else:
+                        failed_experiments += 1
+                        exp_id = result.get('experiment_id', 'unknown')
+                        logger.error(f"Failed experiment {exp_id}")
+                        
             except Exception as e:
-                failed_experiments += 1
-                logger.error(f"Exception in experiment {experiment_id}: {str(e)}")
+                failed_experiments += len(gpu_experiments)
+                logger.error(f"Exception in GPU {gpu_id} experiments: {str(e)}")
     
     # Summary
     total_time = time.time() - start_time
