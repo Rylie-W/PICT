@@ -401,15 +401,34 @@ def run_single_experiment(args_tuple):
     return generator.run_simulation()
 
 def detect_available_gpus() -> List[int]:
-    """Detect all available GPUs."""
+    """Detect all available GPUs using nvidia-smi or torch cuda device count."""
     available_gpus = []
-    for i in range(4):  # Check up to 4 GPUs
-        try:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(i)
-            if torch.cuda.is_available():
-                available_gpus.append(i)
-        except:
-            continue
+    
+    # Method 1: Use torch.cuda.device_count() (most reliable)
+    try:
+        if torch.cuda.is_available():
+            num_gpus = torch.cuda.device_count()
+            available_gpus = list(range(num_gpus))
+            return available_gpus
+    except Exception as e:
+        logger.warning(f"Failed to detect GPUs using torch: {e}")
+    
+    # Method 2: Fallback - try nvidia-smi
+    try:
+        import subprocess
+        result = subprocess.run(['nvidia-smi', '-L'], 
+                              capture_output=True, text=True, check=True)
+        # Count lines starting with "GPU"
+        gpu_lines = [line for line in result.stdout.split('\n') if line.startswith('GPU')]
+        available_gpus = list(range(len(gpu_lines)))
+        return available_gpus
+    except Exception as e:
+        logger.warning(f"Failed to detect GPUs using nvidia-smi: {e}")
+    
+    # Method 3: Last resort - assume single GPU if cuda is available
+    if torch.cuda.is_available():
+        return [0]
+    
     return available_gpus
 
 def save_experiment_data(experiment_data: dict, save_dir: Path):
