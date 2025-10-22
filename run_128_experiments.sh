@@ -31,7 +31,7 @@ if [ "$DT" = "auto" ]; then
         --start_time 4.5 \
         --end_time 25.0 \
         --num_samples 166 \ 
-        --max_parallel_per_gpu 4
+        --max_parallel_per_gpu 5
 else
     echo "Using custom time step: $DT"
     python generate_128_experiments.py \
@@ -44,7 +44,7 @@ else
         --start_time 4.5 \
         --end_time 25.0 \
         --num_samples 166 \
-        --max_parallel_per_gpu 4
+        --max_parallel_per_gpu 5
 fi
 
 echo "=========================================="
