@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--gpu_id', type=int, required=True)
     parser.add_argument('--experiments_file', type=str, required=True)
     parser.add_argument('--args_file', type=str, required=True)
+    parser.add_argument('--max_parallel', type=int, default=2, help='Maximum parallel experiments per GPU')
     args = parser.parse_args()
     
     # Set CUDA_VISIBLE_DEVICES before importing torch
@@ -43,22 +44,51 @@ def main():
     with open(args.args_file, 'rb') as f:
         main_args = pickle.load(f)
     
-    logger.info(f"GPU {args.gpu_id} worker: Starting {len(experiments)} experiments")
+    logger.info(f"GPU {args.gpu_id} worker: Starting {len(experiments)} experiments with max_parallel={args.max_parallel}")
     
-    results = []
-    for experiment_id, gpu_id, _ in experiments:
+    # Use parallel execution within the GPU process
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    def run_single_experiment_wrapper(experiment_tuple):
+        """Wrapper to run a single experiment and handle exceptions."""
+        experiment_id, gpu_id, _ = experiment_tuple
         try:
             generator = TurbulenceExperimentGenerator(experiment_id, gpu_id, main_args)
             result = generator.run_simulation()
-            results.append(result)
             logger.info(f"GPU {gpu_id} worker: Completed experiment {experiment_id}")
+            return result
         except Exception as e:
             logger.error(f"GPU {gpu_id} worker: Exception in experiment {experiment_id}: {str(e)}")
-            results.append({
+            return {
                 'experiment_id': experiment_id,
                 'success': False,
                 'error': str(e)
-            })
+            }
+    
+    results = []
+    
+    # Run experiments in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=args.max_parallel) as executor:
+        # Submit all experiments
+        future_to_experiment = {
+            executor.submit(run_single_experiment_wrapper, exp): exp 
+            for exp in experiments
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_experiment):
+            experiment = future_to_experiment[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                experiment_id = experiment[0]
+                logger.error(f"GPU {args.gpu_id} worker: Future exception in experiment {experiment_id}: {str(e)}")
+                results.append({
+                    'experiment_id': experiment_id,
+                    'success': False,
+                    'error': str(e)
+                })
     
     # Save results
     results_file = args.experiments_file.replace('_experiments.pkl', '_results.pkl')
