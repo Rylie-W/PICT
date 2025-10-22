@@ -409,14 +409,15 @@ def run_single_experiment(args_tuple):
     generator = TurbulenceExperimentGenerator(experiment_id, gpu_id, args)
     return generator.run_simulation()
 
-def run_gpu_experiments_batch(gpu_id, experiments):
+def run_gpu_experiments_batch(gpu_id, experiments, max_parallel_experiments=2):
     """
-    Run all experiments for a specific GPU in a single process.
-    This ensures proper CUDA_VISIBLE_DEVICES isolation.
+    Run all experiments for a specific GPU in parallel processes.
+    This ensures proper CUDA_VISIBLE_DEVICES isolation and parallel execution.
     
     Args:
         gpu_id: Physical GPU ID to use
         experiments: List of (experiment_id, gpu_id, args) tuples for this GPU
+        max_parallel_experiments: Maximum number of experiments to run in parallel on this GPU
     
     Returns:
         List of experiment results
@@ -424,23 +425,53 @@ def run_gpu_experiments_batch(gpu_id, experiments):
     # CRITICAL: Set CUDA_VISIBLE_DEVICES before ANY PyTorch/CUDA operations
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     
-    logger.info(f"GPU {gpu_id} worker: Starting {len(experiments)} experiments with CUDA_VISIBLE_DEVICES={gpu_id}")
+    logger.info(f"GPU {gpu_id} worker: Starting {len(experiments)} experiments with CUDA_VISIBLE_DEVICES={gpu_id}, max_parallel={max_parallel_experiments}")
     
     results = []
-    for experiment_id, gpu_id, args in experiments:
+    
+    # Use ThreadPoolExecutor for parallel execution within the same GPU process
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    def run_single_experiment_wrapper(experiment_tuple):
+        """Wrapper to run a single experiment and handle exceptions."""
+        experiment_id, gpu_id, args = experiment_tuple
         try:
             generator = TurbulenceExperimentGenerator(experiment_id, gpu_id, args)
             result = generator.run_simulation()
-            results.append(result)
+            logger.info(f"GPU {gpu_id} worker: Completed experiment {experiment_id}")
+            return result
         except Exception as e:
             logger.error(f"GPU {gpu_id} worker: Exception in experiment {experiment_id}: {str(e)}")
-            results.append({
+            return {
                 'experiment_id': experiment_id,
                 'success': False,
                 'error': str(e)
-            })
+            }
     
-    logger.info(f"GPU {gpu_id} worker: Completed {len(experiments)} experiments")
+    # Run experiments in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max_parallel_experiments) as executor:
+        # Submit all experiments
+        future_to_experiment = {
+            executor.submit(run_single_experiment_wrapper, exp): exp 
+            for exp in experiments
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_experiment):
+            experiment = future_to_experiment[future]
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                experiment_id = experiment[0]
+                logger.error(f"GPU {gpu_id} worker: Future exception in experiment {experiment_id}: {str(e)}")
+                results.append({
+                    'experiment_id': experiment_id,
+                    'success': False,
+                    'error': str(e)
+                })
+    
+    logger.info(f"GPU {gpu_id} worker: Completed {len(experiments)} experiments with parallel execution")
     return results
 
 def detect_available_gpus() -> List[int]:
@@ -512,6 +543,7 @@ def main():
     parser.add_argument('--save_dir', type=str, default='./data/128_experiments', help='Output directory')
     parser.add_argument('--num_experiments', type=int, default=128, help='Number of experiments to generate')
     parser.add_argument('--max_workers', type=int, default=None, help='Maximum number of parallel workers')
+    parser.add_argument('--max_parallel_per_gpu', type=int, default=2, help='Maximum number of parallel experiments per GPU')
     
     args = parser.parse_args()
     
@@ -596,7 +628,8 @@ def main():
             str(script_path),
             '--gpu_id', str(gpu_id),
             '--experiments_file', str(exp_file),
-            '--args_file', str(args_file)
+            '--args_file', str(args_file),
+            '--max_parallel', str(args.max_parallel_per_gpu)
         ]
         
         env = os.environ.copy()

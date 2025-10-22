@@ -365,11 +365,250 @@ cuda_device = torch.device("cuda")
 cpu_device = torch.device("cpu")
 
 
+class KolmogorovForcing:
+    """
+    Classic Kolmogorov turbulence forcing implementation - matches JAX cfd-ml.
+    
+    Maintains statistically steady turbulence by applying external sinusoidal 
+    driving force plus linear damping, following the standard Kolmogorov forcing.
+    
+    Mathematical formulation (matching JAX cfd-ml):
+    f_u = scale * sin(k * y)     # External sinusoidal driving in u-component
+    f_v = 0                      # No external force in v-component
+    f_w = 0                      # No external force in w-component (3D only)
+    f_total = [f_u, f_v, f_w] + λ * velocity  # Add linear damping
+    
+    where:
+    - scale: forcing amplitude
+    - k: forcing wavenumber (typically 4, to match training data)
+    - λ: linear damping coefficient (typically -0.1)
+    - y: spatial coordinate in y-direction
+    """
+    
+    def __init__(self, forcing_scale=1.0, linear_coefficient=-0.1, 
+                 forcing_wavenumber=4.0, target_energy_rate=None,
+                 device=None, dtype=torch.float32):
+        """
+        Initialize Kolmogorov forcing.
+        
+        Args:
+            forcing_scale: Overall amplitude of forcing
+            linear_coefficient: Linear damping coefficient (-λ in exp(-λt))
+            forcing_wavenumber: Maximum wavenumber for forcing (k_f)
+            target_energy_rate: Target energy injection rate (ε)
+            device: Computing device (CPU/GPU)
+            dtype: Data type
+        """
+        self.forcing_scale = forcing_scale
+        self.linear_coefficient = linear_coefficient
+        self.forcing_wavenumber = forcing_wavenumber
+        self.target_energy_rate = target_energy_rate
+        self.device = device if device is not None else torch.device('cpu')
+        self.dtype = dtype
+        
+        # Energy injection tracking
+        self.energy_history = []
+        self.step_count = 0
+        
+    def __call__(self, velocity, forcing_scale=None, linear_coefficient=None):
+        """
+        Compute Kolmogorov forcing for given velocity field.
+        
+        Args:
+            velocity: Velocity field tensor [batch, channels, height, width]
+            forcing_scale: Override forcing scale
+            linear_coefficient: Override linear coefficient
+            
+        Returns:
+            forcing: Forcing field tensor with same shape as velocity
+        """
+        # Use provided parameters or defaults
+        f_scale = forcing_scale if forcing_scale is not None else self.forcing_scale
+        lin_coeff = linear_coefficient if linear_coefficient is not None else self.linear_coefficient
+        
+        # Get velocity field dimensions
+        batch_size, n_channels, *spatial_dims = velocity.shape
+        
+        if len(spatial_dims) == 2:  # 2D case
+            return self._compute_forcing_2d(velocity, f_scale, lin_coeff)
+        elif len(spatial_dims) == 3:  # 3D case
+            return self._compute_forcing_3d(velocity, f_scale, lin_coeff)
+        else:
+            raise ValueError(f"Unsupported spatial dimensions: {len(spatial_dims)}")
+    
+    def _compute_forcing_2d(self, velocity, forcing_scale, linear_coefficient):
+        """
+        Compute 2D Kolmogorov forcing - Classic implementation.
+        
+        Mathematical formulation:
+        f_u = scale * sin(k * y)  # External sinusoidal driving in u-component (y-direction)
+        f_v = 0                   # No external force in v-component  
+        f_total = [f_u, f_v] + λ * velocity  # Add linear damping
+        
+        This creates horizontal stripes in the force field:
+        u_force = scale * sin(k * y)  # Horizontal stripes (varies in y)
+        v_force = 0
+        """
+        batch_size, n_channels, ny, nx = velocity.shape
+        
+        # Create spatial coordinates (assuming domain [0, 2π * domain_scale])
+        domain_length = 2 * np.pi  # Standard domain for Kolmogorov forcing
+        dy = domain_length / ny  # Use y-direction spacing
+        y_coords = torch.arange(ny, device=self.device, dtype=self.dtype) * dy
+        
+        # Classic Kolmogorov forcing: f_u = scale * sin(k * y), f_v = 0
+        # This creates horizontal stripes in the force field
+        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * y_coords)
+        v_force = torch.zeros_like(u_force)
+        
+        # Expand to match velocity tensor shape [batch, channels, y, x]
+        # u_force: [ny] -> [batch, 1, ny, nx]
+        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, ny, nx)
+        # v_force: [ny] -> [batch, 1, ny, nx]  
+        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, ny, nx)
+        
+        # Combine force components
+        if n_channels == 2:  # 2D case
+            forcing_external = torch.cat([u_force, v_force], dim=1)
+        elif n_channels == 3:  # 3D case - add zero w-component
+            w_force = torch.zeros_like(u_force)
+            forcing_external = torch.cat([u_force, v_force, w_force], dim=1)
+        else:
+            raise ValueError(f"Unsupported number of velocity components: {n_channels}")
+        
+        # Add linear damping term: λ * velocity
+        # This matches JAX's linear_forcing implementation
+        forcing_total = forcing_external + linear_coefficient * velocity
+        
+        # Update energy tracking
+        self._update_energy_tracking(velocity, forcing_total)
+        
+        return forcing_total.to(dtype=self.dtype)
+    
+    def _compute_forcing_3d(self, velocity, forcing_scale, linear_coefficient):
+        """
+        Compute 3D Kolmogorov forcing - Classic implementation.
+        
+        Mathematical formulation:
+        f_u = scale * sin(k * y)  # External sinusoidal driving in u-component (y-direction)
+        f_v = 0                   # No external force in v-component
+        f_w = 0                   # No external force in w-component
+        f_total = [f_u, f_v, f_w] + λ * velocity  # Add linear damping
+        """
+        batch_size, n_channels, nz, ny, nx = velocity.shape
+        
+        # Create spatial coordinates (assuming domain [0, 2π * domain_scale])
+        domain_length = 2 * np.pi  # Standard domain for Kolmogorov forcing
+        dy = domain_length / ny  # Use y-direction spacing
+        y_coords = torch.arange(ny, device=self.device, dtype=self.dtype) * dy
+        
+        # Classic Kolmogorov forcing: f_u = scale * sin(k * y), f_v = f_w = 0
+        # This creates horizontal stripes in the force field
+        u_force = forcing_scale * torch.sin(self.forcing_wavenumber * y_coords)
+        v_force = torch.zeros_like(u_force)
+        w_force = torch.zeros_like(u_force)
+        
+        # Expand to match velocity tensor shape [batch, channels, z, y, x]
+        # u_force: [ny] -> [batch, 1, nz, ny, nx]
+        u_force = u_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
+        # v_force: [ny] -> [batch, 1, nz, ny, nx]
+        v_force = v_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
+        # w_force: [ny] -> [batch, 1, nz, ny, nx]
+        w_force = w_force.unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1).expand(batch_size, 1, nz, ny, nx)
+        
+        # Combine force components for 3D
+        if n_channels == 3:
+            forcing_external = torch.cat([u_force, v_force, w_force], dim=1)
+        else:
+            raise ValueError(f"Expected 3 velocity components for 3D, got {n_channels}")
+        
+        # Add linear damping term: λ * velocity
+        # This matches JAX's linear_forcing implementation
+        forcing_total = forcing_external + linear_coefficient * velocity
+        
+        # Update energy tracking
+        self._update_energy_tracking(velocity, forcing_total)
+        
+        return forcing_total.to(dtype=self.dtype)
+    
+    def _compute_kinetic_energy(self, velocity):
+        """Compute total kinetic energy: E = (1/2)∫|u|²dV"""
+        kinetic_energy = 0.5 * torch.sum(velocity**2)
+        return kinetic_energy.item()
+    
+    def _compute_adaptive_amplitude(self, current_energy):
+        """
+        Compute adaptive forcing amplitude to maintain target energy injection rate.
+        
+        Uses simple proportional control:
+        A = A₀ * (ε_target / ε_current)^α
+        """
+        if len(self.energy_history) > 1:
+            # Estimate current energy injection rate
+            dt = 1.0  # Assume unit timestep
+            energy_change = current_energy - self.energy_history[-1]
+            current_rate = energy_change / dt
+            
+            if abs(current_rate) > 1e-10:
+                # Proportional control
+                amplitude = self.forcing_scale * (self.target_energy_rate / abs(current_rate))**0.1
+                # Clamp to reasonable range
+                amplitude = max(0.1 * self.forcing_scale, min(10.0 * self.forcing_scale, amplitude))
+            else:
+                amplitude = self.forcing_scale
+        else:
+            amplitude = self.forcing_scale
+            
+        return amplitude
+    
+    def _update_energy_tracking(self, velocity, forcing):
+        """Update energy tracking for adaptive forcing."""
+        kinetic_energy = self._compute_kinetic_energy(velocity)
+        self.energy_history.append(kinetic_energy)
+        
+        # Keep only recent history
+        if len(self.energy_history) > 100:
+            self.energy_history.pop(0)
+            
+        self.step_count += 1
+        
+        # Log energy statistics periodically
+        if self.step_count % 100 == 0:
+            energy_injection = torch.sum(velocity * forcing).item()
+            print(f"Step {self.step_count}: KE={kinetic_energy:.3e}, "
+                  f"Energy injection={energy_injection:.3e}")
+    
+    def get_energy_statistics(self):
+        """Get current energy statistics."""
+        if len(self.energy_history) < 2:
+            return {"kinetic_energy": 0.0, "energy_rate": 0.0}
+            
+        current_energy = self.energy_history[-1]
+        energy_rate = self.energy_history[-1] - self.energy_history[-2]
+        
+        return {
+            "kinetic_energy": current_energy,
+            "energy_rate": energy_rate,
+            "step_count": self.step_count
+        }
+
+
 class TurbulenceDataGenerator:
     def __init__(self, args):
         self.args = args
         self.dtype = torch.float32
         self.logger = logging.getLogger("TurbulenceGen")
+        
+        # Initialize Kolmogorov forcing if enabled
+        if self.args.kolmogorov:
+            self.kolmogorov_forcing = KolmogorovForcing(
+                forcing_scale=self.args.forcing_scale,
+                linear_coefficient=self.args.linear_coefficient,
+                forcing_wavenumber=self.args.peak_wavenumber,
+                target_energy_rate=getattr(args, 'target_energy_rate', None),
+                device=cuda_device,
+                dtype=self.dtype
+            )
         
     def create_domain(self, resolution):
         """Create a 3D periodic domain for turbulence simulation"""
@@ -1030,13 +1269,24 @@ class TurbulenceDataGenerator:
         # Load reference data for comparison
         reference_data, ref_timestep = self.load_reference_training_data(resolution)
         
-        # Storage for trajectory data and comparison results
-        trajectory_data = []
+        # Storage for trajectory data and comparison results - now stores both velocity and force
+        trajectory_data = {'velocity': [], 'force': []}
         comparison_stats = []
+        
+        # Check if force data is available (Kolmogorov forcing enabled)
+        has_forcing = getattr(self.args, 'kolmogorov', False)
         
         # Initial comparison (step 0)
         initial_velocity = domain.getBlock(0).velocity
-        trajectory_data.append(initial_velocity.detach().cpu().numpy().copy())
+        trajectory_data['velocity'].append(initial_velocity.detach().cpu().numpy().copy())
+        
+        # Get initial force field if Kolmogorov forcing is enabled
+        if has_forcing and domain.getBlock(0).hasVelocitySource():
+            initial_force = domain.getBlock(0).velocitySource.detach().cpu().numpy()
+            trajectory_data['force'].append(initial_force.copy())
+        else:
+            # Store zeros if no forcing
+            trajectory_data['force'].append(np.zeros_like(initial_velocity.detach().cpu().numpy()))
         
         if reference_data is not None:
             stats = self.compare_with_reference(
@@ -1051,7 +1301,15 @@ class TurbulenceDataGenerator:
             
             # Get current velocity field
             current_velocity = domain.getBlock(0).velocity
-            trajectory_data.append(current_velocity.detach().cpu().numpy().copy())
+            trajectory_data['velocity'].append(current_velocity.detach().cpu().numpy().copy())
+            
+            # Get current force field if Kolmogorov forcing is enabled
+            if has_forcing and domain.getBlock(0).hasVelocitySource():
+                current_force = domain.getBlock(0).velocitySource.detach().cpu().numpy()
+                trajectory_data['force'].append(current_force.copy())
+            else:
+                # Store zeros if no forcing
+                trajectory_data['force'].append(np.zeros_like(current_velocity.detach().cpu().numpy()))
             
             # Compare with reference data
             if reference_data is not None:
@@ -1067,7 +1325,11 @@ class TurbulenceDataGenerator:
         if comparison_stats:
             self.save_comparison_summary(comparison_stats, resolution)
         
-        return np.array(trajectory_data)
+        # Convert to numpy arrays for compatibility
+        trajectory_data['velocity'] = np.array(trajectory_data['velocity']) if trajectory_data['velocity'] else np.array([])
+        trajectory_data['force'] = np.array(trajectory_data['force']) if trajectory_data['force'] else np.array([])
+        
+        return trajectory_data
     
     def run_simulation(self, sim, domain, resolution, steps, save_interval, start_step=None):
         """Run simulation and collect velocity trajectory data using existing simulation instance"""
@@ -1075,39 +1337,75 @@ class TurbulenceDataGenerator:
         if getattr(self.args, 'enable_comparison', False):
             return self.run_simulation_with_comparison(sim, domain, resolution, steps, save_interval)
         
-        # Storage for trajectory data
-        trajectory_data = []
-
+        # Storage for trajectory data - now stores both velocity and force
+        trajectory_data = {'velocity': [], 'force': []}
+        
+        # Check if force data is available (Kolmogorov forcing enabled)
+        has_forcing = getattr(self.args, 'kolmogorov', False)
+        
         # Run simulation and collect data
-        start = (start_step if start_step is not None else 0) + save_interval
-        end = (start_step if start_step is not None else 0) + steps + save_interval
-        for step in range(start, end, save_interval):
+        for step in range(0, steps, save_interval):
+            if step%1000 == 0 and step > 0:  # 跳过第0步（数据为空）
+                percentage = (step / steps) * 100
+                print(f"Step {step} of {steps} ({percentage:.1f}%). ")
+                
+                # 保存当前轨迹数据（如果有数据）
+                if len(trajectory_data['velocity']) > 0:
+                    print(f"Saving trajectory data at step {step} with {len(trajectory_data['velocity'])} time points...")
+                    # 修改保存文件名包含步数
+                    original_save_file = self.args.save_file
+                    self.args.save_file = f"{original_save_file}_step{step}"
+                    
+                    # Convert lists to numpy arrays before saving
+                    data_to_save = {
+                        'velocity': np.array(trajectory_data['velocity']),
+                        'force': np.array(trajectory_data['force'])
+                    }
+                    
+                    self.save_trajectory_data(data_to_save, resolution, self.args.training_timestep)
+                    trajectory_data = {'velocity': [], 'force': []}
+                    self.args.save_file = original_save_file
+                    
+                    # 强制垃圾回收
+                    gc.collect()
             sim.run(iterations=save_interval)
-
-            if start_step is not None:
-                save_dir = Path(self.args.save_dir) / "check" / f"step_{start_step}"
+            
+            # Get current velocity field
+            velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
+            trajectory_data['velocity'].append(velocity.copy())
+            
+            # Get current force field if Kolmogorov forcing is enabled
+            if has_forcing and domain.getBlock(0).hasVelocitySource():
+                force = domain.getBlock(0).velocitySource.detach().cpu().numpy()
+                trajectory_data['force'].append(force.copy())
             else:
-                save_dir = Path(self.args.save_dir)
-            save_dir.mkdir(parents=True, exist_ok=True)
-
-            data_file = save_dir / f"{self.args.save_file}_{resolution}x{resolution}_step_{step}"
-            domain_io.save_domain(domain, str(data_file))
-            self.logger.info(f"Saved domain to {data_file}")
+                # Store zeros if no forcing
+                trajectory_data['force'].append(np.zeros_like(velocity))
             
         
         # 保存最后剩余的数据
-        if len(trajectory_data) > 0:
-            print(f"Saving final trajectory data with {len(trajectory_data)} time points...")
+        if len(trajectory_data['velocity']) > 0:
+            print(f"Saving final trajectory data with {len(trajectory_data['velocity'])} time points...")
             original_save_file = self.args.save_file
             self.args.save_file = f"{original_save_file}_final"
             
-            self.save_trajectory_data(np.array(trajectory_data), resolution, self.args.training_timestep)
+            # Convert lists to numpy arrays before saving
+            data_to_save = {
+                'velocity': np.array(trajectory_data['velocity']),
+                'force': np.array(trajectory_data['force'])
+            }
+            
+            self.save_trajectory_data(data_to_save, resolution, self.args.training_timestep)
             self.args.save_file = original_save_file
         
             
             print("Final data saved successfully.")
         
-        return np.array(trajectory_data)
+        # Convert to numpy arrays for compatibility
+        trajectory_data['velocity'] = np.array(trajectory_data['velocity']) if trajectory_data['velocity'] else np.array([])
+        trajectory_data['force'] = np.array(trajectory_data['force']) if trajectory_data['force'] else np.array([])
+        
+        return trajectory_data
     
     def save_comparison_summary(self, comparison_stats, resolution):
         """Save a summary of all comparison statistics"""
@@ -1187,7 +1485,7 @@ class TurbulenceDataGenerator:
         
 
     
-    def create_simulation(self, domain, time_step, log_interval, log_dir_name):
+    def create_simulation(self, domain, time_step, log_interval, log_dir_name, prep_fn={}):
         """Create a PISOtorch simulation instance with consistent settings"""
         log_dir = Path(self.args.save_dir) / log_dir_name
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -1204,7 +1502,8 @@ class TurbulenceDataGenerator:
             visualize_max_steps=getattr(self.args, 'visualize_max_steps', None),
             log_interval=log_interval,
             log_dir=str(log_dir),
-            stop_fn=lambda: False
+            stop_fn=lambda: False,
+            prep_fn=prep_fn
         )
         
         return sim
@@ -1212,13 +1511,24 @@ class TurbulenceDataGenerator:
     def warmup_simulation(self, sim, resolution, warmup_steps):
         """Run warmup simulation to reach statistically steady state using existing simulation instance"""
         
-        # Storage for warmup trajectory data
-        warmup_trajectory = []
+        # Storage for warmup trajectory data - now stores both velocity and force
+        warmup_trajectory = {'velocity': [], 'force': []}
+        
+        # Check if force data is available (Kolmogorov forcing enabled)
+        has_forcing = getattr(self.args, 'kolmogorov', False)
         
         # Collect initial state
         domain = sim.domain
         initial_velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
-        warmup_trajectory.append(initial_velocity.copy())
+        warmup_trajectory['velocity'].append(initial_velocity.copy())
+        
+        # Get initial force field if Kolmogorov forcing is enabled
+        if has_forcing and domain.getBlock(0).hasVelocitySource():
+            initial_force = domain.getBlock(0).velocitySource.detach().cpu().numpy()
+            warmup_trajectory['force'].append(initial_force.copy())
+        else:
+            # Store zeros if no forcing
+            warmup_trajectory['force'].append(np.zeros_like(initial_velocity))
         
         # Run warmup and collect data at every step
         for step in range(warmup_steps):
@@ -1227,7 +1537,15 @@ class TurbulenceDataGenerator:
             
             # Collect velocity field after each step
             current_velocity = domain.getBlock(0).velocity.detach().cpu().numpy()
-            warmup_trajectory.append(current_velocity.copy())
+            warmup_trajectory['velocity'].append(current_velocity.copy())
+            
+            # Get current force field if Kolmogorov forcing is enabled
+            if has_forcing and domain.getBlock(0).hasVelocitySource():
+                current_force = domain.getBlock(0).velocitySource.detach().cpu().numpy()
+                warmup_trajectory['force'].append(current_force.copy())
+            else:
+                # Store zeros if no forcing
+                warmup_trajectory['force'].append(np.zeros_like(current_velocity))
             
             # Memory management: save and clean every 1000 steps during warmup
             if (step + 1) % 100 == 0:
@@ -1235,13 +1553,19 @@ class TurbulenceDataGenerator:
                 print(f"Warmup step {step + 1} of {warmup_steps} ({percentage:.1f}%). ")
                 
                 # Save warmup data if we have enough
-                if len(warmup_trajectory) > 0:
-                    print(f"Saving warmup trajectory data at step {step + 1} with {len(warmup_trajectory)} time points...")
+                if len(warmup_trajectory['velocity']) > 0:
+                    print(f"Saving warmup trajectory data at step {step + 1} with {len(warmup_trajectory['velocity'])} time points...")
                     original_save_file = self.args.save_file
                     self.args.save_file = f"{original_save_file}_warmup_step{step + 1}"
                     
-                    self.save_trajectory_data(np.array(warmup_trajectory), resolution, self.args.training_timestep)
-                    warmup_trajectory = []  # Clear all warmup data to save memory
+                    # Convert lists to numpy arrays before saving
+                    warmup_data_to_save = {
+                        'velocity': np.array(warmup_trajectory['velocity']),
+                        'force': np.array(warmup_trajectory['force'])
+                    }
+                    
+                    self.save_trajectory_data(warmup_data_to_save, resolution, self.args.training_timestep)
+                    warmup_trajectory = {'velocity': [], 'force': []}  # Clear all warmup data to save memory
                     self.args.save_file = original_save_file
                     
                     # Force garbage collection
@@ -1249,19 +1573,27 @@ class TurbulenceDataGenerator:
                     print("Warmup memory cleaned.")
         
         # Save final warmup data if any remains
-        if len(warmup_trajectory) > 0:
-            print(f"Saving final warmup trajectory data with {len(warmup_trajectory)} time points...")
+        if len(warmup_trajectory['velocity']) > 0:
+            print(f"Saving final warmup trajectory data with {len(warmup_trajectory['velocity'])} time points...")
             original_save_file = self.args.save_file
             self.args.save_file = f"{original_save_file}_warmup_final"
             
-            self.save_trajectory_data(np.array(warmup_trajectory), resolution, self.args.training_timestep)
+            # Convert lists to numpy arrays before saving
+            warmup_data_to_save = {
+                'velocity': np.array(warmup_trajectory['velocity']),
+                'force': np.array(warmup_trajectory['force'])
+            }
+            
+            self.save_trajectory_data(warmup_data_to_save, resolution, self.args.training_timestep)
             self.args.save_file = original_save_file
             print("Final warmup data saved successfully.")
         
-        # Convert to numpy array (will be small or empty now)
-        warmup_trajectory = np.array(warmup_trajectory)
+        # Convert to numpy arrays for compatibility
+        warmup_trajectory['velocity'] = np.array(warmup_trajectory['velocity']) if warmup_trajectory['velocity'] else np.array([])
+        warmup_trajectory['force'] = np.array(warmup_trajectory['force']) if warmup_trajectory['force'] else np.array([])
         
-        print("Final warmup_trajectory.shape", warmup_trajectory.shape)
+        print("Final warmup_trajectory velocity shape:", warmup_trajectory['velocity'].shape)
+        print("Final warmup_trajectory force shape:", warmup_trajectory['force'].shape)
         return warmup_trajectory
     
 
@@ -1569,9 +1901,69 @@ class TurbulenceDataGenerator:
                     torch.cuda.empty_cache()
                     gc.collect()
                 
+                # Verify downsampling quality
+                energy_ratio = self.verify_downsampling_quality(hr_initial_velocity, initial_velocity, downsample_method)
+                self.logger.info(f"Energy preservation ratio: {energy_ratio:.4f}")
+            
+            # Create domain for this resolution
+            domain, block = self.create_domain(resolution)
+            
+            # Set initial velocity
+            block.setVelocity(initial_velocity)
+            domain.PrepareSolve()
+            domain.UpdateDomainData()
+            
+            # Calculate timesteps for this resolution
+            timestep_info = self._calculate_simulation_timesteps(resolution, hr_training_timestep, initial_velocity)
+            warmup_timestep, training_timestep, warmup_steps = timestep_info
+            print(f"Warmup timestep: {warmup_timestep}, Training timestep: {training_timestep}, Warmup steps: {warmup_steps}")
+            
+            prep_fn = {}
+            if self.args.kolmogorov:
+                def pfn_set_forcing(domain, time_step, **kwargs):
+                    velocity = domain.getBlock(0).velocity
+                    forcing = self.kolmogorov_forcing(velocity, self.args.forcing_scale, self.args.linear_coefficient)
+                    domain.getBlock(0).setVelocitySource(forcing)
+                    domain.UpdateDomainData()
+                # register the callback: before each simulation step ("PRE") the simulation calls 'pfn_set_forcing'
+                PISOtorch_simulation.append_prep_fn(prep_fn, "PRE", pfn_set_forcing)
+            
+            # Create simulation instance for this resolution
+            sim = self.create_simulation(
+                domain, 
+                warmup_timestep, 
+                max(warmup_steps // 10, 1), 
+                f"resolution_{resolution}_logs",
+                prep_fn=prep_fn
+            )
+            
+            # Run warmup simulation
+            self.logger.info(f"Running warmup simulation for {warmup_steps} steps with timestep {warmup_timestep:.2e}")
+            warmup_trajectory = self.warmup_simulation(sim, resolution, warmup_steps)
+            
+            # Save warmup trajectory data
+            self.save_warmup_trajectory_data(warmup_trajectory, resolution, warmup_timestep)
+            
+            # Run main simulation
+            self.logger.info(f"Running main simulation for {self.args.generate_steps} steps")
+            self.run_simulation(
+                sim, domain, resolution, self.args.generate_steps, 
+                save_interval=self.args.save_interval
+            )
+            
+            self.logger.info(f"COMPLETED SIMULATION FOR RESOLUTION {resolution}x{resolution}")
+            
+            # Clean up GPU memory before next resolution
+            del domain, block, sim, initial_velocity
+            if resolution != self.args.high_res:
+                del warmup_trajectory  # Only delete if we're not using it for next resolution
+            torch.cuda.empty_cache()
+            gc.collect()
+        
         self.logger.info(f"\n{'='*60}")
         self.logger.info("ALL MULTI-RESOLUTION SIMULATIONS COMPLETED!")
         self.logger.info(f"{'='*60}")
+
 
     def _get_hr_initial_velocity(self, use_warmup_data_init, use_training_data_init):
         """Get or generate high-resolution initial velocity field"""
@@ -1639,7 +2031,7 @@ class TurbulenceDataGenerator:
         return warmup_timestep, training_timestep, warmup_steps
 
     def save_trajectory_data(self, trajectory, resolution, timestep=None):
-        """Save trajectory data in numpy format"""
+        """Save trajectory data in numpy format - now includes both velocity and force data"""
         save_dir = Path(self.args.save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         
@@ -1652,20 +2044,37 @@ class TurbulenceDataGenerator:
             # Use computed CFD timestep instead of arbitrary default
             timestep = self.compute_cfd_timestep(resolution)
         
-        num_timesteps = trajectory.shape[0]
+        # Handle both old format (numpy array) and new format (dict with velocity and force)
+        if isinstance(trajectory, dict):
+            velocity_data = trajectory['velocity']
+            force_data = trajectory['force']
+        else:
+            # Legacy compatibility - trajectory is just velocity data
+            velocity_data = trajectory
+            force_data = np.zeros_like(trajectory)  # Create zero force data
+        
+        num_timesteps = velocity_data.shape[0]
         time_array = np.arange(num_timesteps) * timestep
         
         # Extract velocity components
-        if trajectory.shape[2] == 3:  # 3D
-            u_data = trajectory[:, 0, 0, :, :, :]  # x-velocity
-            v_data = trajectory[:, 0, 1, :, :, :]  # y-velocity  
-            w_data = trajectory[:, 0, 2, :, :, :]  # z-velocity
+        if velocity_data.shape[2] == 3:  # 3D
+            u_data = velocity_data[:, 0, 0, :, :, :]  # x-velocity
+            v_data = velocity_data[:, 0, 1, :, :, :]  # y-velocity  
+            w_data = velocity_data[:, 0, 2, :, :, :]  # z-velocity
+            
+            # Extract force components
+            fu_data = force_data[:, 0, 0, :, :, :]  # x-force
+            fv_data = force_data[:, 0, 1, :, :, :]  # y-force  
+            fw_data = force_data[:, 0, 2, :, :, :]  # z-force
             
             np.savez_compressed(
                 str(data_file),
                 u=u_data,
                 v=v_data,
                 w=w_data,
+                fu=fu_data,  # Add force data
+                fv=fv_data,
+                fw=fw_data,
                 time_array=time_array,  # Use consistent field name with training data
                 delta_t=timestep,       # Use consistent field name with training data
                 outer_steps=num_timesteps,
@@ -1679,16 +2088,25 @@ class TurbulenceDataGenerator:
                 dims=3,
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
-                peak_wavenumber=self.args.peak_wavenumber
+                peak_wavenumber=self.args.peak_wavenumber,
+                kolmogorov_forcing=getattr(self.args, 'kolmogorov', False),
+                forcing_scale=getattr(self.args, 'forcing_scale', 0.0),
+                linear_coefficient=getattr(self.args, 'linear_coefficient', 0.0)
             )
         else:  # 2D
-            u_data = trajectory[:, 0, 0, :, :]  # x-velocity
-            v_data = trajectory[:, 0, 1, :, :]  # y-velocity
+            u_data = velocity_data[:, 0, 0, :, :]  # x-velocity
+            v_data = velocity_data[:, 0, 1, :, :]  # y-velocity
+            
+            # Extract force components
+            fu_data = force_data[:, 0, 0, :, :]  # x-force
+            fv_data = force_data[:, 0, 1, :, :]  # y-force
             
             np.savez_compressed(
                 str(data_file),
                 u=u_data,
                 v=v_data,
+                fu=fu_data,  # Add force data
+                fv=fv_data,
                 time_array=time_array,  # Use consistent field name with training data
                 delta_t=timestep,       # Use consistent field name with training data
                 outer_steps=num_timesteps,
@@ -1702,13 +2120,22 @@ class TurbulenceDataGenerator:
                 dims=2,
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
-                peak_wavenumber=self.args.peak_wavenumber
+                peak_wavenumber=self.args.peak_wavenumber,
+                kolmogorov_forcing=getattr(self.args, 'kolmogorov', False),
+                forcing_scale=getattr(self.args, 'forcing_scale', 0.0),
+                linear_coefficient=getattr(self.args, 'linear_coefficient', 0.0)
             )
+        
+        self.logger.info(f"Saved trajectory data: {data_file}")
+        if isinstance(trajectory, dict):
+            self.logger.info(f"  - Velocity data shape: {velocity_data.shape}")
+            self.logger.info(f"  - Force data shape: {force_data.shape}")
+            self.logger.info(f"  - Kolmogorov forcing enabled: {getattr(self.args, 'kolmogorov', False)}")
         
 
     
     def save_warmup_trajectory_data(self, warmup_trajectory, resolution, timestep=None):
-        """Save complete warmup trajectory data in one file"""
+        """Save complete warmup trajectory data in one file - now includes both velocity and force data"""
         save_dir = Path(self.args.save_dir) / "warmup_data" / str(resolution)
         save_dir.mkdir(parents=True, exist_ok=True)
         
@@ -1720,20 +2147,37 @@ class TurbulenceDataGenerator:
         # Save the complete warmup trajectory - ALL STEPS IN ONE FILE
         trajectory_file = save_dir / f"warmup_trajectory_{resolution}x{resolution}_index_{self.args.save_index}.npz"
         
-        num_timesteps = warmup_trajectory.shape[0]
+        # Handle both old format (numpy array) and new format (dict with velocity and force)
+        if isinstance(warmup_trajectory, dict):
+            velocity_data = warmup_trajectory['velocity']
+            force_data = warmup_trajectory['force']
+        else:
+            # Legacy compatibility - warmup_trajectory is just velocity data
+            velocity_data = warmup_trajectory
+            force_data = np.zeros_like(warmup_trajectory)  # Create zero force data
+        
+        num_timesteps = velocity_data.shape[0]
         time_array = np.arange(num_timesteps) * timestep
         
         # Extract velocity components for complete trajectory
-        if warmup_trajectory.shape[2] == 3:  # 3D
-            u_data = warmup_trajectory[:, 0, 0, :, :, :]  # x-velocity
-            v_data = warmup_trajectory[:, 0, 1, :, :, :]  # y-velocity  
-            w_data = warmup_trajectory[:, 0, 2, :, :, :]  # z-velocity
+        if velocity_data.shape[2] == 3:  # 3D
+            u_data = velocity_data[:, 0, 0, :, :, :]  # x-velocity
+            v_data = velocity_data[:, 0, 1, :, :, :]  # y-velocity  
+            w_data = velocity_data[:, 0, 2, :, :, :]  # z-velocity
+            
+            # Extract force components
+            fu_data = force_data[:, 0, 0, :, :, :]  # x-force
+            fv_data = force_data[:, 0, 1, :, :, :]  # y-force  
+            fw_data = force_data[:, 0, 2, :, :, :]  # z-force
             
             np.savez_compressed(
                 str(trajectory_file),
                 u=u_data,
                 v=v_data,
                 w=w_data,
+                fu=fu_data,  # Add force data
+                fv=fv_data,
+                fw=fw_data,
                 time_array=time_array,
                 delta_t=timestep,
                 total_time=self.args.warmup_time,
@@ -1746,16 +2190,25 @@ class TurbulenceDataGenerator:
                 dims=3,
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
-                peak_wavenumber=self.args.peak_wavenumber
+                peak_wavenumber=self.args.peak_wavenumber,
+                kolmogorov_forcing=getattr(self.args, 'kolmogorov', False),
+                forcing_scale=getattr(self.args, 'forcing_scale', 0.0),
+                linear_coefficient=getattr(self.args, 'linear_coefficient', 0.0)
             )
         else:  # 2D
-            u_data = warmup_trajectory[:, 0, 0, :, :]  # x-velocity
-            v_data = warmup_trajectory[:, 0, 1, :, :]  # y-velocity
+            u_data = velocity_data[:, 0, 0, :, :]  # x-velocity
+            v_data = velocity_data[:, 0, 1, :, :]  # y-velocity
+            
+            # Extract force components
+            fu_data = force_data[:, 0, 0, :, :]  # x-force
+            fv_data = force_data[:, 0, 1, :, :]  # y-force
             
             np.savez_compressed(
                 str(trajectory_file),
                 u=u_data,
                 v=v_data,
+                fu=fu_data,  # Add force data
+                fv=fv_data,
                 time_array=time_array,
                 delta_t=timestep,
                 total_time=self.args.warmup_time,
@@ -1768,10 +2221,17 @@ class TurbulenceDataGenerator:
                 dims=2,
                 domain_scale=self.args.domain_scale,
                 cfl_safety_factor=self.args.cfl_safety_factor,
-                peak_wavenumber=self.args.peak_wavenumber
+                peak_wavenumber=self.args.peak_wavenumber,
+                kolmogorov_forcing=getattr(self.args, 'kolmogorov', False),
+                forcing_scale=getattr(self.args, 'forcing_scale', 0.0),
+                linear_coefficient=getattr(self.args, 'linear_coefficient', 0.0)
             )
         
         self.logger.info(f"Saved complete warmup trajectory: {trajectory_file}")
+        if isinstance(warmup_trajectory, dict):
+            self.logger.info(f"  - Velocity data shape: {velocity_data.shape}")
+            self.logger.info(f"  - Force data shape: {force_data.shape}")
+            self.logger.info(f"  - Kolmogorov forcing enabled: {getattr(self.args, 'kolmogorov', False)}")
 
 
 def main():
@@ -1981,6 +2441,18 @@ def main():
                        help='Enable step-by-step comparison with reference training data and visualization')
     parser.add_argument('--training_data_dir', type=str, default='./training_data/warmup_data',
                        help='Directory containing training data files')
+    
+    # Kolmogorov forcing parameters
+    parser.add_argument('--kolmogorov', action='store_true', default=False,
+                       help='Enable Kolmogorov forcing for statistically steady turbulence')
+    parser.add_argument('--forcing_scale', type=float, default=1.0,
+                       help='Overall amplitude of Kolmogorov forcing')
+    parser.add_argument('--linear_coefficient', type=float, default=-0.1,
+                       help='Linear damping coefficient in forcing (-λ)')
+    parser.add_argument('--target_energy_rate', type=float, default=None,
+                       help='Target energy injection rate for adaptive forcing (ε)')
+    parser.add_argument('--forcing_analysis', action='store_true', default=False,
+                       help='Enable detailed forcing analysis and energy tracking')
     
     args = parser.parse_args()
     
