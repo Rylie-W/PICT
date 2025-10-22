@@ -30,7 +30,7 @@ if [ "$DT" = "auto" ]; then
         --domain_scale 1.0 \
         --start_time 4.5 \
         --end_time 25.0 \
-        --num_samples 166 \ 
+        --num_samples 166 \
         --max_parallel_per_gpu 5
 else
     echo "Using custom time step: $DT"
