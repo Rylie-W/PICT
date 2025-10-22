@@ -6,7 +6,7 @@
 # Default parameters
 DT=${1:-"auto"}  # Use "auto" for CFL-based calculation, or specify custom dt
 NUM_EXPERIMENTS=${2:-196}
-SAVE_DIR="/mnt/data/yiwei/training_data/turbulence"
+SAVE_DIR="/mnt/data/yiwei/training_data/turbulence_parallel_exp"
 
 echo "=========================================="
 echo "Running 128 Turbulence Experiments"
